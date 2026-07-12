@@ -1,0 +1,344 @@
+# superhot-tty configuration file.
+# Place at /etc/superhot-tty/config.toml or ~/.config/superhot-tty/config.toml
+
+[general]
+shell = "zsh"
+font = "Lat2-Terminus16"
+font_size = 16
+gap = 4
+border = 1
+outer_padding = 4
+status_bar_height = 24
+framerate = 60
+# 0.0 — без глитчей, 1.0 — максимум. MCD-стиль: 0.15.
+glitch_intensity = 0.15
+
+[theme]
+bg = "#0A0716"
+tile_bg_inactive = "#120E24"
+tile_bg_active = "#0F0A1E"
+border_inactive = "#3A2D5C"
+border_active = "#FF2E97"
+border_x11 = "#00F0FF"
+fg_default = "#E6E1F0"
+fg_dim = "#7A6F96"
+accent_magenta = "#FF2E97"
+accent_cyan = "#00F0FF"
+popup_bg = "#140B2E"
+popup_border = "#FF2E97"
+error = "#FF4D4D"
+
+# ===== Workspaces =====
+[[workspaces]]
+n = 1
+name = "MAIN"
+
+[[workspaces]]
+n = 2
+name = "WEB"
+
+[[workspaces]]
+n = 3
+name = "DEV"
+
+[[workspaces]]
+n = 4
+name = "CHAT"
+
+[[workspaces]]
+n = 5
+name = "MEDIA"
+
+[[workspaces]]
+n = 6
+name = "6"
+
+[[workspaces]]
+n = 7
+name = "7"
+
+[[workspaces]]
+n = 8
+name = "8"
+
+[[workspaces]]
+n = 9
+name = "9"
+
+# ===== Key bindings =====
+# mods: Super, Ctrl, Alt, Shift
+# key:  any key name (a-z, 0-9, Return, Space, Tab, Left, Right, Up, Down, F1-F12, etc.)
+
+[[keybindings]]
+key = "Return"
+mods = ["Super"]
+action = { type = "terminal" }
+
+[[keybindings]]
+key = "d"
+mods = ["Super"]
+action = { type = "launcher" }
+
+[[keybindings]]
+key = "v"
+mods = ["Super"]
+action = { type = "split_vertical" }
+
+[[keybindings]]
+key = "h"
+mods = ["Super"]
+action = { type = "focus", dir = "left" }
+
+[[keybindings]]
+key = "j"
+mods = ["Super"]
+action = { type = "focus", dir = "down" }
+
+[[keybindings]]
+key = "k"
+mods = ["Super"]
+action = { type = "focus", dir = "up" }
+
+[[keybindings]]
+key = "l"
+mods = ["Super"]
+action = { type = "focus", dir = "right" }
+
+[[keybindings]]
+key = "h"
+mods = ["Super", "Shift"]
+action = { type = "move", dir = "left" }
+
+[[keybindings]]
+key = "j"
+mods = ["Super", "Shift"]
+action = { type = "move", dir = "down" }
+
+[[keybindings]]
+key = "k"
+mods = ["Super", "Shift"]
+action = { type = "move", dir = "up" }
+
+[[keybindings]]
+key = "l"
+mods = ["Super", "Shift"]
+action = { type = "move", dir = "right" }
+
+[[keybindings]]
+key = "h"
+mods = ["Super", "Ctrl"]
+action = { type = "swap", dir = "left" }
+
+[[keybindings]]
+key = "j"
+mods = ["Super", "Ctrl"]
+action = { type = "swap", dir = "down" }
+
+[[keybindings]]
+key = "k"
+mods = ["Super", "Ctrl"]
+action = { type = "swap", dir = "up" }
+
+[[keybindings]]
+key = "l"
+mods = ["Super", "Ctrl"]
+action = { type = "swap", dir = "right" }
+
+[[keybindings]]
+key = "q"
+mods = ["Super"]
+action = { type = "close" }
+
+[[keybindings]]
+key = "f"
+mods = ["Super"]
+action = { type = "fullscreen" }
+
+[[keybindings]]
+key = "r"
+mods = ["Super"]
+action = { type = "resize_mode" }
+
+[[keybindings]]
+key = "h"
+mods = ["Super", "Alt"]
+action = { type = "resize", dir = "left", delta = 0.05 }
+
+[[keybindings]]
+key = "j"
+mods = ["Super", "Alt"]
+action = { type = "resize", dir = "down", delta = 0.05 }
+
+[[keybindings]]
+key = "k"
+mods = ["Super", "Alt"]
+action = { type = "resize", dir = "up", delta = 0.05 }
+
+[[keybindings]]
+key = "l"
+mods = ["Super", "Alt"]
+action = { type = "resize", dir = "right", delta = 0.05 }
+
+[[keybindings]]
+key = "space"
+mods = ["Super"]
+action = { type = "cycle_focus" }
+
+[[keybindings]]
+key = "1"
+mods = ["Super"]
+action = { type = "workspace", n = 1 }
+
+[[keybindings]]
+key = "2"
+mods = ["Super"]
+action = { type = "workspace", n = 2 }
+
+[[keybindings]]
+key = "3"
+mods = ["Super"]
+action = { type = "workspace", n = 3 }
+
+[[keybindings]]
+key = "4"
+mods = ["Super"]
+action = { type = "workspace", n = 4 }
+
+[[keybindings]]
+key = "5"
+mods = ["Super"]
+action = { type = "workspace", n = 5 }
+
+[[keybindings]]
+key = "6"
+mods = ["Super"]
+action = { type = "workspace", n = 6 }
+
+[[keybindings]]
+key = "7"
+mods = ["Super"]
+action = { type = "workspace", n = 7 }
+
+[[keybindings]]
+key = "8"
+mods = ["Super"]
+action = { type = "workspace", n = 8 }
+
+[[keybindings]]
+key = "9"
+mods = ["Super"]
+action = { type = "workspace", n = 9 }
+
+[[keybindings]]
+key = "1"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 1 }
+
+[[keybindings]]
+key = "2"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 2 }
+
+[[keybindings]]
+key = "3"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 3 }
+
+[[keybindings]]
+key = "4"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 4 }
+
+[[keybindings]]
+key = "5"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 5 }
+
+[[keybindings]]
+key = "6"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 6 }
+
+[[keybindings]]
+key = "7"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 7 }
+
+[[keybindings]]
+key = "8"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 8 }
+
+[[keybindings]]
+key = "9"
+mods = ["Super", "Shift"]
+action = { type = "move_to_workspace", n = 9 }
+
+[[keybindings]]
+key = "e"
+mods = ["Super", "Shift"]
+action = { type = "quit" }
+
+[[keybindings]]
+key = "e"
+mods = ["Super"]
+action = { type = "spawn_x11", cmd = "xterm", args = [] }
+
+[[keybindings]]
+key = "w"
+mods = ["Super"]
+action = { type = "toggle_layout" }
+
+# ===== Launcher =====
+[launcher]
+max_rows = 12
+x11_display = ":1"
+desktop_paths = [
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "~/.local/share/applications",
+]
+
+[launcher.custom_entries]
+"terminal: bash" = "zsh"
+"reload config" = "superhot-tty-reload"
+
+# ===== Audio (PipeWire) =====
+[audio]
+start_pipewire_pulse = true
+start_wireplumber = true
+default_volume = 70
+
+# ===== Portal (screen share) =====
+[portal]
+start_portal = true
+service_name = "org.freedesktop.impl.portal.desktop.SuperHot"
+object_path = "/org/freedesktop/portal/desktop"
+
+# ===== Gamepad =====
+[gamepad]
+enabled = true
+steam_passthrough = true
+stick_sensitivity = 50
+
+[gamepad.keymap]
+"a" = "Return"
+"b" = "Escape"
+"x" = "space"
+"y" = "Tab"
+"dpad_up" = "k"
+"dpad_down" = "j"
+"dpad_left" = "h"
+"dpad_right" = "l"
+"start" = "Super"
+"back" = "Super"
+"left_shoulder" = "bracketleft"
+"right_shoulder" = "bracketright"
+
+# ===== X11 =====
+[x11]
+dri3 = true
+display = ":1"
+screen_size = [1920, 1080]
+xtest_input = true
+hardware_cursor = true

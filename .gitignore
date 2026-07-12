@@ -1,0 +1,24 @@
+# Build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo lock (binary project, not library)
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config overrides
+config.local.toml
+
+# Logs
+*.log
