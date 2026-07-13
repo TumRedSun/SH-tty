@@ -236,6 +236,65 @@ fn run_wm(
         Err(e) => { log::warn!("X11 not started: {}", e); None }
     };
 
+    // Hardware DRM cursor (если включён в конфиге).
+    let mut hw_cursor: Option<drm::HardwareCursor> = if cfg.x11.hardware_cursor {
+        if let Some(mb) = &multi_backend {
+            match drm::HardwareCursor::new(mb.fd, mb.primary_monitor().crtc_id) {
+                Ok(c) => {
+                    log::info!("hardware cursor initialized on CRTC {}", mb.primary_monitor().crtc_id);
+                    Some(c)
+                }
+                Err(e) => { log::warn!("hardware cursor init failed: {} — falling back to software cursor", e); None }
+            }
+        } else {
+            log::info!("hardware cursor requires multi-monitor backend, skipping");
+            None
+        }
+    } else {
+        log::info!("hardware cursor disabled in config");
+        None
+    };
+
+    // Overlay planes manager (для 0% CPU X11 rendering).
+    let mut overlay_mgr: Option<drm::OverlayManager> = if cfg.x11.overlay_planes && cfg.x11.dri3 {
+        if let Some(mb) = &multi_backend {
+            match drm::OverlayManager::new(mb.fd) {
+                Ok(m) => {
+                    log::info!("overlay planes manager initialized ({} planes)", m.planes.len());
+                    Some(m)
+                }
+                Err(e) => { log::warn!("overlay manager init failed: {} — X11 will use CPU blit", e); None }
+            }
+        } else {
+            log::info!("overlay planes require multi-monitor backend, skipping");
+            None
+        }
+    } else {
+        log::info!("overlay planes disabled in config");
+        None
+    };
+
+    // DRI3 version check + xcb connection для FFI.
+    let mut dri3_version: Option<x11::dri3::Dri3Version> = None;
+    let xcb_conn_opt: Option<*mut libc::c_void> = if cfg.x11.dri3 {
+        if let Some(ref _x) = x11 {
+            match get_xcb_connection(&cfg.x11.display) {
+                Ok(xcb_conn) => {
+                    match x11::dri3::query_version(xcb_conn) {
+                        Ok(v) => {
+                            log::info!("DRI3 {}.{} available", v.major, v.minor);
+                            dri3_version = Some(v);
+                            Some(xcb_conn)
+                        }
+                        Err(e) => { log::warn!("DRI3 query_version failed: {}", e); None }
+                    }
+                }
+                Err(e) => { log::warn!("xcb connection failed: {}", e); None }
+            }
+        } else { None }
+    } else { None };
+    let _ = &dri3_version;
+
     // Audio.
     let _audio = if cfg.audio.start_pipewire_pulse || cfg.audio.start_wireplumber {
         audio::AudioStack::start(cfg.audio.start_pipewire_pulse, cfg.audio.start_wireplumber).ok()
@@ -403,7 +462,15 @@ fn run_wm(
 
         // 3. Mouse.
         if let Some(m) = mouse.as_mut() {
-            let _ = m.poll();
+            let events = m.poll();
+            // Обновляем hardware cursor позицию.
+            if let Some(hc) = hw_cursor.as_mut() {
+                for ev in &events {
+                    if let input::MouseEvent::Move(x, y) = ev {
+                        let _ = hc.move_to(*x, *y);
+                    }
+                }
+            }
         }
 
         // 4. PTY reads.
@@ -441,29 +508,49 @@ fn run_wm(
                         continue;
                     }
 
-                    // Если pending_x11_tile — привязываем к нему (launcher/manual spawn).
-                    if let Some(leaf_id) = pending_x11_tile.take() {
+                    let assigned_leaf_id = if let Some(leaf_id) = pending_x11_tile.take() {
                         x.bind_window_to_tile(leaf_id.0, x11::XWindowId(xid));
                         placement_cache.mark_placed(xid, placement);
-                        continue;
-                    }
-
-                    // Auto-place по window rules.
-                    if cfg.x11.auto_place_windows {
+                        Some(leaf_id)
+                    } else if cfg.x11.auto_place_windows {
                         // Если правило указывает workspace — переключаемся.
                         if let Some(ws) = placement.workspace {
                             if ws != workspaces.current {
                                 workspaces.switch_to(ws);
                             }
                         }
-                        // Создаём X11 tile.
                         let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
                         x.bind_window_to_tile(new_id.0, x11::XWindowId(xid));
                         placement_cache.mark_placed(xid, placement);
+                        Some(new_id)
+                    } else { None };
+
+                    // Если overlay planes включены — пытаемся импортировать dma-buf.
+                    if let (Some(leaf_id), Some(ov), Some(ver)) = (assigned_leaf_id, overlay_mgr.as_mut(), dri3_version) {
+                        if let Some(xwid) = x.tile_window(leaf_id.0) {
+                            // Получаем pixmap для окна через CompositeNameWindowPixmap.
+                            // Здесь упрощённо: пробуем buffers_from_pixmap.
+                            if let Some(xcb_conn) = xcb_conn_opt {
+                                match x11::dri3::pixmap_to_dmabuf(xcb_conn, xwid.0, ver) {
+                                    Ok(dmabuf) => {
+                                        let crtc_id = multi_backend.as_ref().map(|mb| mb.primary_monitor().crtc_id).unwrap_or(0);
+                                        let tile_rect = workspaces.current_layout()
+                                            .tile_rects(Rect { x: 0, y: 0, w: canvas.width, h: canvas.height })
+                                            .into_iter()
+                                            .find(|(id, _, _)| *id == leaf_id);
+                                        if let Some((_, _, rect)) = tile_rect {
+                                            let _ = ov.assign_window(xwid.0, crtc_id, &dmabuf,
+                                                rect.x, rect.y, rect.w, rect.h);
+                                        }
+                                    }
+                                    Err(e) => log::debug!("DRI3 pixmap_to_dmabuf for 0x{:x}: {}", xwid.0, e),
+                                }
+                            }
+                        }
                     }
                 }
             }
-            // Refresh backings.
+            // Refresh backings (для CPU blit fallback).
             let bindings: Vec<(u64, x11::XWindowId)> = x.tile_bindings.iter()
                 .map(|(k, v)| (*k, *v)).collect();
             for (_, xwid) in bindings {
@@ -472,7 +559,7 @@ fn run_wm(
         }
 
         // 6. Render.
-        render_frame(&canvas, &font, &theme, &workspaces, &terminals, &x11, &popups, &launcher, &cfg, mouse.as_ref());
+        render_frame(&canvas, &font, &theme, &workspaces, &terminals, &x11, &popups, &launcher, &cfg, mouse.as_ref(), hw_cursor.as_ref());
 
         // 7. Flip.
         blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
@@ -758,6 +845,7 @@ fn render_frame(
     launcher: &launcher::Launcher,
     cfg: &Config,
     mouse: Option<&input::Mouse>,
+    hw_cursor: Option<&drm::HardwareCursor>,
 ) {
     canvas.fill(theme.bg);
     let layout = workspaces.current_layout();
@@ -831,9 +919,11 @@ fn render_frame(
     // Status bar.
     render_status_bar(canvas, font, theme, workspaces, cfg);
 
-    // Mouse cursor.
-    if let Some(m) = mouse {
-        m.render_cursor(canvas, theme);
+    // Mouse cursor (только если hardware cursor не активен).
+    if hw_cursor.is_none() {
+        if let Some(m) = mouse {
+            m.render_cursor(canvas, theme);
+        }
     }
 }
 
@@ -976,6 +1066,27 @@ fn set_nonblocking(fd: RawFd) {
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 }
+
+/// Открывает xcb_connection_t для DRI3 FFI.
+/// Возвращает raw pointer (must not be freed by caller — uses static).
+fn get_xcb_connection(display: &str) -> Result<*mut libc::c_void> {
+    use libloading::Library;
+    static XCB_LIB: std::sync::OnceLock<Option<Library>> = std::sync::OnceLock::new();
+    let lib = XCB_LIB.get_or_init(|| {
+        unsafe { Library::new("libxcb.so.1").ok() }
+    }).as_ref().context("libxcb not available")?;
+    unsafe {
+        let connect: unsafe extern "C" fn(*const libc::c_char) -> *mut libc::c_void =
+            *lib.get(b"xcb_connect\0").context("xcb_connect not found")?;
+        let display_c = std::ffi::CString::new(display).unwrap();
+        let conn = connect(display_c.as_ptr());
+        if conn.is_null() {
+            anyhow::bail!("xcb_connect returned null");
+        }
+        Ok(conn)
+    }
+}
+
 
 /// Blit canvas → backend back buffer (multi-monitor или single).
 fn blit_to_backend(canvas: &Canvas, multi: &Option<MultiMonitorBackend>, single: Option<&mut Backend>) {

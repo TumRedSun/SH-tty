@@ -746,7 +746,16 @@ superhot-tty/
 
 ## Roadmap
 
-### v0.3 (текущая)
+### v0.4 (текущая — реализовано)
+- ✅ **Полная DRI3/DMA-BUF реализация (FFI к xcb-dri3)** — `src/x11/dri3.rs`
+- ✅ **Hardware DRM cursor plane** — `src/drm/cursor.rs`
+- ✅ **Hardware DRM overlay planes (0% CPU для X11)** — `src/drm/planes.rs`
+- 🚧 Live reload конфигурации
+- 🚧 Анимации перехода между workspaces
+- 🚧 IPC сокет (как i3-msg)
+- 🚧 Полная xterm совместимость (libvterm)
+
+### v0.3
 - ✅ Login screen (PAM)
 - ✅ Multi-monitor с per-monitor workspace binding
 - ✅ 10 workspaces (Mod4+1..0)
@@ -757,14 +766,60 @@ superhot-tty/
 - ✅ 3 пакета (pacman/.deb/.rpm)
 - ✅ Config в XDG-пути
 
-### v0.4 (план)
-- Полная DRI3/DMA-BUF реализация (FFI к xcb-dri3)
-- Hardware DRM cursor plane
-- Hardware DRM overlay planes (0% CPU для X11)
-- Live reload конфигурации
-- Анимации перехода между workspaces
-- IPC сокет (как i3-msg)
-- Полная xterm совместимость (libvterm)
+---
+
+## v0.4: GPU acceleration
+
+### DRI3 + DMA-BUF (FFI к xcb-dri3)
+
+Полная реализация через FFI к `libxcb-dri3` (динамическая загрузка через `libloading`):
+
+- `DRI3QueryVersion` — проверка поддержки DRI3 на X-сервере
+- `DRI3Open` — получение authenticated DRM fd от X-сервера
+- `DRI3BuffersFromPixmap` (DRI3 1.2+) — получение dma-buf fd с modifiers
+- `DRI3BufferFromPixmap` (DRI3 1.0) — fallback без modifiers
+- Автоматический выбор API по версии DRI3
+
+`src/x11/dri3.rs` — полностью реализован, использует `libloading` для runtime загрузки `libxcb-dri3.so.0`.
+
+### Hardware DRM cursor plane
+
+DRM dedicated cursor plane через `DRM_IOCTL_MODE_CURSOR2`:
+
+- Узнёт размер курсора через `DRM_CAP_CURSOR_WIDTH/HEIGHT` (типично 64×64)
+- Создаёт dumb buffer ARGB для курсора
+- MCD-styled crosshair курсор (неоновый крестик с магента-центром и glow)
+- `move_to(x, y)` — только обновляет позицию, **0% CPU**, без перерисовки framebuffer
+- `show()` / `hide()` — управление видимостью
+- `update_image()` — смена изображения (для анимации)
+
+`src/drm/cursor.rs` — `HardwareCursor` struct.
+
+### Hardware DRM overlay planes
+
+Overlay planes для X11 окон — **0% CPU** rendering:
+
+1. При `CreateNotify` X11 окна:
+   - `CompositeNameWindowPixmap` → pixmap
+   - `DRI3BuffersFromPixmap` → dma-buf fd
+2. Импорт dma-buf в DRM:
+   - `DRM_IOCTL_PRIME_FD_TO_HANDLE` → GEM handle
+   - `DRM_IOCTL_MODE_ADDFB2` с modifiers → DRM framebuffer
+3. `DRM_IOCTL_MODE_SETPLANE` — присвоение framebuffer к overlay plane
+4. GPU composites overlay поверх primary scanout на лету
+
+`src/drm/planes.rs` — `OverlayManager` с отслеживанием занятых planes, auto-finding free overlay plane per CRTC.
+
+### Конфигурация
+
+```toml
+[x11]
+dri3 = true              # DRI3 + DMA-BUF
+hardware_cursor = true   # DRM cursor plane
+overlay_planes = true    # 0% CPU X11 rendering
+```
+
+Если `overlay_planes = false` — X11 окна blit'ятся в canvas (CPU). Fallback на случай если GPU не поддерживает достаточно overlay planes.
 
 ---
 

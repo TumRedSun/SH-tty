@@ -498,3 +498,4 @@ screen_size = [1920, 1080]
 xtest_input = true
 hardware_cursor = true
 auto_place_windows = true
+overlay_planes = true              # 0% CPU для X11 окон через hardware overlay planes
