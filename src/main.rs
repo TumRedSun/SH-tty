@@ -33,7 +33,7 @@ use drm::{Backend, MultiMonitorBackend};
 use layout::{Direction, FocusDir, Layout, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
 use render::{Canvas, Font, TextRenderer};
 use term::{Pty, VTerm};
-use ui::{Theme, Popup, PixelFmt, Color};
+use ui::{Theme, Popup as PopupWidget, PixelFmt, Color};
 use input::{Keyboard, Key, KeyEvent};
 use config::window_rules::{WindowRuleEngine, PlacementCache, WindowInfo};
 use login::LoginScreen;
@@ -292,8 +292,8 @@ fn run_wm(
     }
 
     // Popups.
-    let mut popups: Vec<Popup> = Vec::new();
-    popups.push(Popup::info(
+    let mut popups: Vec<PopupWidget> = Vec::new();
+    popups.push(PopupWidget::info(
         &format!("SUPERHOT TTY v0.3 — {} | Mod4+D launcher | Mod4+1..0 workspaces",
             cfg.login.effective_title()),
         canvas.width, canvas.height,
@@ -316,14 +316,16 @@ fn run_wm(
                             let entry = launcher.entries[idx].clone();
                             let display = cfg.x11.display.clone();
                             let shell = cfg.launcher.terminal_shell.clone();
+                            let is_terminal = entry.is_terminal;
+                            let entry_name = entry.name.clone();
                             std::thread::spawn(move || {
                                 let _ = launcher::Launcher::launch(&entry, &display, &shell);
                             });
                             // Если графическое — создаём X11 tile.
-                            if !entry.is_terminal && x11.is_some() {
+                            if !is_terminal && x11.is_some() {
                                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
                                 pending_x11_tile = Some(new_id);
-                            } else if entry.is_terminal {
+                            } else if is_terminal {
                                 // Терминальное приложение — создаём нативный терминал.
                                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
                                 if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
@@ -331,7 +333,7 @@ fn run_wm(
                                     terminals.insert(new_id, TerminalTile {
                                         pty,
                                         vterm: VTerm::new(cols.min(200), rows.min(80)),
-                                        title: entry.name.clone(),
+                                        title: entry_name,
                                         workspace: workspaces.current,
                                     });
                                 }
@@ -473,7 +475,7 @@ fn run_wm(
         render_frame(&canvas, &font, &theme, &workspaces, &terminals, &x11, &popups, &launcher, &cfg, mouse.as_ref());
 
         // 7. Flip.
-        blit_to_backend(&canvas, &multi_backend, single_backend.as_deref_mut());
+        blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
         flip_backend(&multi_backend, single_backend.as_mut())?;
 
         // 8. Popups tick.
@@ -505,7 +507,7 @@ fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
         .map(|r| r.atom);
 
     let class = if let Some(atom) = wm_class_atom {
-        get_property(conn, false, xid, atom, x11rb::protocol::xproto::AtomEnum::STRING.into(), 0, 1024)
+        get_property(conn, false, xid, atom, u32::from(x11rb::protocol::xproto::AtomEnum::STRING), 0, 1024)
             .ok().and_then(|c| c.reply().ok())
             .and_then(|r| String::from_utf8(r.value).ok())
             .and_then(|s| s.split('\0').nth(1).map(|s| s.to_string()))
@@ -513,7 +515,7 @@ fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
     } else { String::new() };
 
     let title = if let Some(atom) = wm_name_atom {
-        get_property(conn, false, xid, atom, x11rb::protocol::xproto::AtomEnum::STRING.into(), 0, 1024)
+        get_property(conn, false, xid, atom, u32::from(x11rb::protocol::xproto::AtomEnum::STRING), 0, 1024)
             .ok().and_then(|c| c.reply().ok())
             .and_then(|r| String::from_utf8(r.value).ok())
             .unwrap_or_default()
@@ -565,7 +567,7 @@ fn handle_hotkey(
     workspaces: &mut Workspaces,
     terminals: &mut HashMap<LeafId, TerminalTile>,
     x11: &mut Option<x11::X11Compositor>,
-    popups: &mut Vec<Popup>,
+    popups: &mut Vec<PopupWidget>,
     quit: &mut bool,
     resize_mode: &mut bool,
     pending_x11_tile: &mut Option<LeafId>,
@@ -614,7 +616,7 @@ fn execute_action(
     workspaces: &mut Workspaces,
     terminals: &mut HashMap<LeafId, TerminalTile>,
     x11: &mut Option<x11::X11Compositor>,
-    popups: &mut Vec<Popup>,
+    popups: &mut Vec<PopupWidget>,
     quit: &mut bool,
     resize_mode: &mut bool,
     pending_x11_tile: &mut Option<LeafId>,
@@ -672,7 +674,7 @@ fn execute_action(
         Fullscreen => workspaces.current_layout_mut().toggle_fullscreen(),
         ResizeMode => {
             *resize_mode = !*resize_mode;
-            popups.push(Popup::info(
+            popups.push(PopupWidget::info(
                 if *resize_mode { "RESIZE — HJKL to resize, Esc to exit" }
                 else { "resize mode off" },
                 canvas.width, canvas.height));
@@ -681,7 +683,7 @@ fn execute_action(
         CycleFocus => workspaces.current_layout_mut().focus_cycle(),
         Quit => *quit = true,
         TabNext | TabPrev | ToggleLayout | Reload => {
-            popups.push(Popup::info(&format!("action {:?} not implemented yet", action), canvas.width, canvas.height));
+            popups.push(PopupWidget::info(&format!("action {:?} not implemented yet", action), canvas.width, canvas.height));
         }
         PopupScript { cmd, args } => {
             // Запускаем скрипт, перехватываем stdout, показываем в popup.
@@ -691,15 +693,15 @@ fn execute_action(
             match output {
                 Ok(o) => {
                     let text = String::from_utf8_lossy(&o.stdout).to_string();
-                    popups.push(Popup::script(&text, canvas.width, canvas.height));
+                    popups.push(PopupWidget::script(&text, canvas.width, canvas.height));
                 }
                 Err(e) => {
-                    popups.push(Popup::info(&format!("script error: {}", e), canvas.width, canvas.height));
+                    popups.push(PopupWidget::info(&format!("script error: {}", e), canvas.width, canvas.height));
                 }
             }
         }
         Popup { text } => {
-            popups.push(Popup::script(&text, canvas.width, canvas.height));
+            popups.push(PopupWidget::script(&text, canvas.width, canvas.height));
         }
     }
     Ok(())
@@ -752,7 +754,7 @@ fn render_frame(
     workspaces: &Workspaces,
     terminals: &HashMap<LeafId, TerminalTile>,
     x11: &Option<x11::X11Compositor>,
-    popups: &[Popup],
+    popups: &[PopupWidget],
     launcher: &launcher::Launcher,
     cfg: &Config,
     mouse: Option<&input::Mouse>,
@@ -983,10 +985,11 @@ fn blit_to_backend(canvas: &Canvas, multi: &Option<MultiMonitorBackend>, single:
         let canvas_stride = canvas.stride as usize;
         let min_stride = canvas_stride.min(stride as usize);
         let rows = canvas.height as usize;
+        let len_usize = len as usize;
         for r in 0..rows {
             let src_off = r * canvas_stride;
             let dst_off = r * stride as usize;
-            let n = min_stride.min(canvas_data.len() - src_off).min(len - dst_off);
+            let n = min_stride.min(canvas_data.len() - src_off).min(len_usize - dst_off);
             unsafe {
                 std::ptr::copy_nonoverlapping(canvas_data.as_ptr().add(src_off),
                                               ptr.add(dst_off), n);

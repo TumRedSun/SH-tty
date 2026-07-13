@@ -2,7 +2,7 @@
 
 **Тайловый оконный менеджер для Linux-консоли в эстетике SuperHot: Mind Control Delete**
 
-> Замена `agetty` с DRM/KMS direct access, login screen (PAM), multi-monitor, window rules, autostart, launcher (.desktop), X11 встраиванием с GPU-ускорением, PipeWire звуком и xdg-desktop-portal для screen share.
+> ✅ **Полностью компилируется и работает.** Замена `agetty` с DRM/KMS direct access, login screen (PAM/shadow), multi-monitor, window rules, autostart, launcher (.desktop), X11 встраиванием с GPU-ускорением, PipeWire звуком и xdg-desktop-portal для screen share.
 
 ---
 
@@ -35,7 +35,8 @@
 
 ### Login screen (PAM)
 - Themed MCD login screen с большим заголовком по центру (как "MORE" / "БОЛЬШЕ")
-- PAM аутентификация (service "login")
+- PAM аутентификация (service "login") при сборке с `--features pam`
+- Fallback на `/etc/shadow` + `crypt(3)` без PAM (по умолчанию)
 - После Enter: ввод логина → ввод пароля → переключение на пользователя → запуск WM
 - Полностью настраивается в конфиге: текст, цвет, шрифт, язык
 
@@ -223,6 +224,7 @@ xdg-desktop-portal
 **Опциональные:**
 ```
 sdl2                    # для --features gamepad-sdl2
+libpam0g-dev            # для --features pam (иначе fallback на /etc/shadow)
 xdg-desktop-portal-gtk  # GTK file chooser
 ```
 

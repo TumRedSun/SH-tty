@@ -14,6 +14,9 @@ path = "src/main.rs"
 default = []
 # Включает SDL2 gamepad support. Требует libsdl2-dev.
 gamepad-sdl2 = ["dep:sdl2"]
+# Включает PAM аутентификацию (libpam). Без этой фичи login screen
+# использует упрощённую проверку через /etc/passwd + crypt.
+pam = []
 
 [dependencies]
 # DRM/KMS raw access

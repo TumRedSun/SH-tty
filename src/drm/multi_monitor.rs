@@ -117,10 +117,8 @@ impl MultiMonitorBackend {
             // Находим CRTC.
             let crtc_id = conn.encoder_id
                 .and_then(|eid| get_encoder_crtc(fd, eid))
-                .unwrap_or_else(|_| {
-                    // Fallback: первый доступный CRTC.
-                    get_first_crtc(fd).unwrap_or(0)
-                });
+                .or_else(|| get_first_crtc(fd))
+                .unwrap_or(0);
 
             // Modeset.
             set_crtc(fd, crtc_id, back_fb, conn.connector_id, &mode)?;

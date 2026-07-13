@@ -256,16 +256,18 @@ impl LoginScreen {
         }
 
         // Corner brackets (MCD style).
-        let cs = 32;
-        let pad = 16;
-        canvas.fill_rect(pad, pad, cs, 3, theme.accent_magenta);
-        canvas.fill_rect(pad, pad, 3, cs, theme.accent_magenta);
-        canvas.fill_rect(screen_w as i32 - pad - cs, pad, cs, 3, theme.accent_magenta);
-        canvas.fill_rect(screen_w as i32 - pad - 3, pad, 3, cs, theme.accent_magenta);
-        canvas.fill_rect(pad, screen_h as i32 - pad - 3, cs, 3, theme.accent_magenta);
-        canvas.fill_rect(pad, screen_h as i32 - pad - cs, 3, cs, theme.accent_magenta);
-        canvas.fill_rect(screen_w as i32 - pad - cs, screen_h as i32 - pad - 3, cs, 3, theme.accent_magenta);
-        canvas.fill_rect(screen_w as i32 - pad - 3, screen_h as i32 - pad - cs, 3, cs, theme.accent_magenta);
+        let cs: i32 = 32;
+        let pad: i32 = 16;
+        let sw = screen_w as i32;
+        let sh = screen_h as i32;
+        canvas.fill_rect(pad, pad, cs as u32, 3, theme.accent_magenta);
+        canvas.fill_rect(pad, pad, 3, cs as u32, theme.accent_magenta);
+        canvas.fill_rect(sw - pad - cs, pad, cs as u32, 3, theme.accent_magenta);
+        canvas.fill_rect(sw - pad - 3, pad, 3, cs as u32, theme.accent_magenta);
+        canvas.fill_rect(pad, sh - pad - 3, cs as u32, 3, theme.accent_magenta);
+        canvas.fill_rect(pad, sh - pad - cs, 3, cs as u32, theme.accent_magenta);
+        canvas.fill_rect(sw - pad - cs, sh - pad - 3, cs as u32, 3, theme.accent_magenta);
+        canvas.fill_rect(sw - pad - 3, sh - pad - cs, 3, cs as u32, theme.accent_magenta);
     }
 }
 
@@ -296,7 +298,7 @@ fn draw_large_text(canvas: &Canvas, font: &Font, text: &str, x: i32, y: i32, col
 fn chrono_now() -> String {
     let mut t: libc::time_t = 0;
     unsafe { libc::time(&mut t); }
-    let mut tm: libc::tm = std::mem::zeroed();
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&t, &mut tm); }
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
@@ -310,6 +312,7 @@ pub struct UserInfo {
     pub shell: String,
 }
 
+#[cfg(feature = "pam")]
 #[link(name = "pam")]
 extern "C" {
     fn pam_start(service_name: *const libc::c_char, user: *const libc::c_char, pam_conv: *const PamConv, ph: *mut *mut PamHandle) -> i32;
@@ -371,6 +374,7 @@ extern "C" fn pam_conv_fn(num_msg: i32, msg: *mut *const PamMessage, resp: *mut 
 }
 
 /// Аутентифицирует пользователя через PAM.
+#[cfg(feature = "pam")]
 pub fn pam_authenticate(username: &str, password: &str, service: &str) -> Result<UserInfo> {
     unsafe {
         PAM_PASSWORD = Some(password.to_string());
@@ -414,6 +418,59 @@ pub fn pam_authenticate(username: &str, password: &str, service: &str) -> Result
         home_dir,
         shell,
     })
+}
+
+/// Fallback аутентификация без PAM — проверяем через /etc/passwd + /etc/shadow (crypt).
+/// Используется когда libpam недоступен. Менее безопасно (не учитывает PAM политики).
+#[cfg(not(feature = "pam"))]
+pub fn pam_authenticate(username: &str, password: &str, _service: &str) -> Result<UserInfo> {
+    use std::io::Read;
+    // Получаем user info из /etc/passwd.
+    let user_c = CString::new(username).unwrap();
+    let pw = unsafe { libc::getpwnam(user_c.as_ptr()) };
+    if pw.is_null() {
+        anyhow::bail!("user '{}' not found in passwd", username);
+    }
+    let pw_ref = unsafe { &*pw };
+    let uid = pw_ref.pw_uid;
+    let gid = pw_ref.pw_gid;
+    let home_dir = unsafe { CStr::from_ptr(pw_ref.pw_dir).to_string_lossy().to_string() };
+    let shell = unsafe { CStr::from_ptr(pw_ref.pw_shell).to_string_lossy().to_string() };
+
+    // Читаем /etc/shadow для hash пароля.
+    let shadow = std::fs::read_to_string("/etc/shadow")
+        .context("cannot read /etc/shadow (need root)")?;
+    for line in shadow.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() < 2 || parts[0] != username { continue; }
+        let hash = parts[1];
+        if hash.is_empty() || hash == "*" || hash == "!" {
+            anyhow::bail!("account locked or no password");
+        }
+        // Используем libc crypt() для проверки.
+        let hash_c = CString::new(hash).unwrap();
+        let pass_c = CString::new(password).unwrap();
+        let result = unsafe { crypt(pass_c.as_ptr(), hash_c.as_ptr()) };
+        if result.is_null() {
+            anyhow::bail!("crypt() failed");
+        }
+        let result_str = unsafe { CStr::from_ptr(result).to_string_lossy().to_string() };
+        if result_str != hash {
+            anyhow::bail!("invalid password");
+        }
+        return Ok(UserInfo { uid, gid, home_dir, shell });
+    }
+    anyhow::bail!("user '{}' not found in shadow", username);
+}
+
+#[cfg(not(feature = "pam"))]
+#[allow(dead_code)]
+fn _pam_conv_fn_stub() -> i32 { 0 }
+
+#[cfg(not(feature = "pam"))]
+#[link(name = "crypt")]
+extern "C" {
+    fn crypt(key: *const libc::c_char, salt: *const libc::c_char) -> *mut libc::c_char;
 }
 
 /// Переключает процесс на UID/GID пользователя (после успешной аутентификации).
