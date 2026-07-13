@@ -479,6 +479,11 @@ pub struct X11Cfg {
     /// Если false — окно ждёт пока пользователь не привяжет его вручную.
     #[serde(default = "default_true")]
     pub auto_place_windows: bool,
+    /// Использовать hardware overlay planes для X11 окон (0% CPU).
+    /// Если false — X11 окна blit'ятся в canvas (CPU).
+    /// Требует dri3 = true.
+    #[serde(default = "default_true")]
+    pub overlay_planes: bool,
 }
 
 fn default_x11_size() -> (u16, u16) { (1920, 1080) }
@@ -492,6 +497,7 @@ impl Default for X11Cfg {
             xtest_input: true,
             hardware_cursor: true,
             auto_place_windows: true,
+            overlay_planes: true,
         }
     }
 }

@@ -1,10 +1,14 @@
 pub mod kms;
 pub mod fbdev;
 pub mod multi_monitor;
+pub mod cursor;
+pub mod planes;
 
 pub use kms::DrmBackend;
 pub use fbdev::FbdevBackend;
 pub use multi_monitor::{MultiMonitorBackend, Monitor};
+pub use cursor::HardwareCursor;
+pub use planes::OverlayManager;
 
 /// Унифицированный backend.
 pub enum Backend {

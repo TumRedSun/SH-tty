@@ -38,15 +38,19 @@ const DRM_IOCTL_MODE_SETCRTC: u32           = iow(0xA0, 10, std::mem::size_of::<
 const DRM_IOCTL_MODE_CREATE_DUMB: u32       = iowr(0xA0, 0xB2, std::mem::size_of::<drm_mode_create_dumb>() as u32);
 const DRM_IOCTL_MODE_MAP_DUMB: u32          = iowr(0xA0, 0xB3, std::mem::size_of::<drm_mode_map_dumb>() as u32);
 const DRM_IOCTL_MODE_DESTROY_DUMB: u32      = iowr(0xA0, 0xB4, std::mem::size_of::<drm_mode_destroy_dumb>() as u32);
+
+// Public helpers for submodules (cursor, planes).
+pub const fn io(typ: u32, nr: u32) -> u32 { _io(typ, nr) }
+pub const fn ior(typ: u32, nr: u32, size: u32) -> u32 { (2 << 30) | (size << 16) | (typ << 8) | nr }
+pub const fn iow(typ: u32, nr: u32, size: u32) -> u32 { (1 << 30) | (size << 16) | (typ << 8) | nr }
+pub const fn iowr(typ: u32, nr: u32, size: u32) -> u32 { (3 << 30) | (size << 16) | (typ << 8) | nr }
+pub const DRM_IOCTL_MODE_DESTROY_DUMB_PUB: u32 = DRM_IOCTL_MODE_DESTROY_DUMB;
 const DRM_IOCTL_MODE_ADDFB2: u32            = iowr(0xA0, 0xB8, std::mem::size_of::<drm_mode_fb_cmd2>() as u32);
 const DRM_IOCTL_MODE_PAGE_FLIP: u32         = iow(0xA0, 0x0B, std::mem::size_of::<drm_mode_crtc_page_flip>() as u32);
 
 // Encoding helpers (linux asm-generic ioctl encoding: dir<<30 | size<<16 | type<<8 | nr)
 const fn _io(typ: u32, nr: u32) -> u32 { (0 << 30) | (0 << 16) | (typ << 8) | nr }
-const fn io(typ: u32, nr: u32) -> u32 { _io(typ, nr) }
-const fn ior(typ: u32, nr: u32, size: u32) -> u32 { (2 << 30) | (size << 16) | (typ << 8) | nr }
-const fn iow(typ: u32, nr: u32, size: u32) -> u32 { (1 << 30) | (size << 16) | (typ << 8) | nr }
-const fn iowr(typ: u32, nr: u32, size: u32) -> u32 { (3 << 30) | (size << 16) | (typ << 8) | nr }
+// (public io/ior/iow/iowr defined above for submodules)
 
 // ===== C structs (must match kernel layout exactly) =====
 
@@ -403,7 +407,7 @@ impl Drop for DrmBackend {
     }
 }
 
-fn ioctl<T>(fd: RawFd, req: u32, arg: &mut T) -> Result<()> {
+pub fn ioctl<T>(fd: RawFd, req: u32, arg: &mut T) -> Result<()> {
     let ret = unsafe { libc::ioctl(fd, req as libc::c_ulong, arg as *mut T as *mut libc::c_void) };
     if ret < 0 {
         anyhow::bail!("ioctl(0x{:x}) failed: {}", req, std::io::Error::last_os_error());
