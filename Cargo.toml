@@ -1,14 +1,18 @@
 [package]
 name = "superhot-tty"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "SuperHot MCD-styled TTY window manager with DRI3, hardware cursor, overlay planes, login screen, multi-monitor"
+description = "SuperHot MCD-styled TTY window manager with DRI3, hardware cursor, overlay planes, login screen, multi-monitor, live-reload config, glitch animations, IPC socket, libvterm xterm compatibility"
 authors = ["superhot-tty contributors"]
 license = "MIT"
 
 [[bin]]
 name = "superhot-tty"
 path = "src/main.rs"
+
+[[bin]]
+name = "shtty-msg"
+path = "src/bin/shtty_msg.rs"
 
 [features]
 default = []

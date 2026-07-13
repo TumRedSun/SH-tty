@@ -499,3 +499,66 @@ xtest_input = true
 hardware_cursor = true
 auto_place_windows = true
 overlay_planes = true              # 0% CPU для X11 окон через hardware overlay planes
+
+# ===== Live reload =====
+# При изменении config.toml WM автоматически перечитывает его и применяет:
+#   - theme (colors)
+#   - keybindings
+#   - window_rules
+#   - animations / ipc / live_reload параметры
+# Поля general.font, x11.display, monitors требуют перезапуска — их изменения
+# логируются как warning и применяются при следующем старте.
+[live_reload]
+enabled = true
+debounce_ms = 250                  # задержка перед перечитыванием (защита от множественных событий)
+
+# ===== Animations =====
+# MCD-style glitch-эффекты для трёх событий:
+#   1. Workspace transition — все символы экрана (терминалы, разделители, X11-окна
+#      как квадраты) перебираются случайными заглавными буквами английского
+#      алфавита и квадратами с разной заливкой. Параллельно новый ws "проявляется":
+#      добавляются недостающие символы, убираются лишние. Затем с левого верхнего
+#      угла в правый нижний символы фиксируются в финальном состоянии.
+#   2. New window — квадрат нового окна заливается перебором, через N мс
+#      corner-to-corner перебор снимается.
+#   3. Random glitch — спонтанный глитч (быстрый corner-to-corner), вероятность
+#      задаётся через general.glitch_intensity и random_glitch_every_frames.
+[animations]
+workspace_transition = true
+new_window = true
+random_glitch = true
+
+# ws transition — три фазы:
+ws_transition_ms = 250             # фаза 1: сплошной перебор всего экрана
+ws_manifest_ms = 200               # фаза 2: целевой ws проявляется поверх перебора (add/remove)
+ws_reveal_ms = 250                 # фаза 3: corner-to-corner фиксация финальных символов
+
+# new window — две фазы:
+new_window_fill_ms = 600           # фаза 1: квадрат окна заливается перебором
+new_window_reveal_ms = 250         # фаза 2: corner-to-corner фиксация (TL → BR)
+
+# random glitch:
+random_glitch_ms = 120             # длительность случайного глитча (короче, чем ws)
+random_glitch_every_frames = 360   # в среднем раз в N кадров (дополнительно умножается на glitch_intensity)
+
+# Скорость перебора символов (chars/sec):
+chars_per_sec = 60                 # для ws transition и new window
+random_chars_per_sec = 220         # для random glitch (значительно быстрее)
+
+# Набор символов для перебора:
+glitch_use_alpha = true            # A-Z (заглавные английские)
+glitch_use_blocks = true           # ▒ ▓ █ ■ □ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ (квадраты с разной заливкой)
+glitch_use_digits = false          # 0-9
+# glitch_color = "#00F0FF"         # цвет глитча (по умолчанию = theme.accent_cyan)
+
+# ===== IPC (i3-msg совместимый сокет) =====
+# WM создаёт UNIX-доменный сокет. Внешние утилиты (shtty-msg) подключаются
+# и отправляют JSON команды. Протокол:
+#   Запрос:  { "type": "command", "cmd": "workspace 2" }
+#   Ответ:   { "status": "ok", "result": ... }
+# Поддерживаемые команды:
+#   workspace N, exec CMD, reload, quit, get_workspaces, get_config, get_focused
+[ipc]
+enabled = true
+# socket_path = "/run/user/1000/superhot-tty.sock"  # пусто = авто ($XDG_RUNTIME_DIR или /tmp)
+socket_mode = 0o600

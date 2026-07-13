@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub mod window_rules;
+pub mod watcher;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -44,6 +45,18 @@ pub struct Config {
     pub gamepad: GamepadCfg,
     #[serde(default)]
     pub x11: X11Cfg,
+    /// Live-reload конфигурации (inotify watcher на config.toml).
+    #[serde(default)]
+    pub live_reload: LiveReloadCfg,
+    /// Анимации перехода между workspaces и появления новых окон.
+    #[serde(default)]
+    pub animations: AnimationsCfg,
+    /// IPC сокет (как i3-msg).
+    #[serde(default)]
+    pub ipc: IpcCfg,
+    /// Внутренний флаг: используется для live reload — сохраняет пути поиска конфига.
+    #[serde(skip)]
+    pub _config_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +191,7 @@ impl LoginCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Binding {
     pub key: String,
     pub mods: Vec<String>,
@@ -225,7 +238,7 @@ pub enum Direction {
     Down,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WorkspaceCfg {
     pub n: u8,
     pub name: String,
@@ -234,7 +247,7 @@ pub struct WorkspaceCfg {
 }
 
 /// Конфигурация монитора: имя коннектора → workspace bindings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct MonitorCfg {
     /// Имя коннектора DRM, например "HDMI-A-1", "DP-1", "eDP-1".
     pub connector: String,
@@ -259,7 +272,7 @@ fn default_true() -> bool { true }
 
 /// Правило для автоматического размещения окон.
 /// Применяется при создании нового X11 окна (через launcher или автоматически).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WindowRule {
     /// Критерий匹配ения. Все непустые поля должны совпасть (AND).
     /// Любое из: window class (WM_CLASS), window title (WM_NAME), app_id (from .desktop).
@@ -502,6 +515,180 @@ impl Default for X11Cfg {
     }
 }
 
+// ===== Live reload =====
+
+/// Конфигурация live-reload'а config.toml.
+///
+/// При изменении файла конфига (через inotify IN_MODIFY) WM перечитывает его
+/// и применяет изменения: тема, keybindings, window rules, animation params.
+/// Some fields (general.font, x11.display) требуют перезапуска — их изменения
+/// логируются как warning и применяются при следующем старте.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveReloadCfg {
+    /// Включить watcher.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Интервал опроса inotify в мс (debounce).
+    #[serde(default = "default_live_reload_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+fn default_live_reload_debounce_ms() -> u64 { 250 }
+
+impl Default for LiveReloadCfg {
+    fn default() -> Self {
+        LiveReloadCfg { enabled: true, debounce_ms: 250 }
+    }
+}
+
+// ===== Animations =====
+
+/// Конфигурация glitch-анимаций MCD-стиля.
+///
+/// Анимации трёх типов:
+///   1. Workspace transition — при переключении ws все символы экрана (терминалы,
+///      разделители, X11-окна как квадраты) перебираются случайными символами
+///      английского алфавита (заглавными) и квадратами с разной заливкой.
+///      Параллельно новый ws "проявляется" — добавляются недостающие символы и
+///      убираются лишние. Затем с левого верхнего угла в правый нижний символы
+///      фиксируются в финальном состоянии.
+///   2. New window — квадрат нового окна заливается перебором, через несколько
+///      секунд с левого верхнего угла в правый нижний перебор снимается.
+///   3. Random glitch — спонтанный глитч-эффект по тому же принципу (угол → угол),
+///      но более быстрый. Срабатывает с вероятностью glitch_intensity на кадр.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnimationsCfg {
+    /// Включить анимации перехода между workspaces.
+    #[serde(default = "default_true")]
+    pub workspace_transition: bool,
+    /// Включить анимацию появления нового окна.
+    #[serde(default = "default_true")]
+    pub new_window: bool,
+    /// Включить случайные глитч-эффекты (MCD-style).
+    #[serde(default = "default_true")]
+    pub random_glitch: bool,
+
+    /// Длительность перехода между ws в мс (фаза перебора).
+    #[serde(default = "default_ws_transition_ms")]
+    pub ws_transition_ms: u32,
+    /// Длительность фазы "manifest" нового ws в мс (проявление целевого ws поверх
+    /// перебора — добавление недостающих и удаление лишних символов).
+    #[serde(default = "default_ws_manifest_ms")]
+    pub ws_manifest_ms: u32,
+    /// Длительность фазы "reveal" (corner-to-corner) в мс — от левого верхнего
+    /// до правого нижнего угла символы фиксируются.
+    #[serde(default = "default_ws_reveal_ms")]
+    pub ws_reveal_ms: u32,
+
+    /// Сколько мс окно "перебирается" перед началом reveal (для new window).
+    #[serde(default = "default_new_window_fill_ms")]
+    pub new_window_fill_ms: u32,
+    /// Длительность corner-to-corner reveal для нового окна в мс.
+    #[serde(default = "default_new_window_reveal_ms")]
+    pub new_window_reveal_ms: u32,
+
+    /// Длительность случайного глитча в мс (короче чем ws transition).
+    #[serde(default = "default_random_glitch_ms")]
+    pub random_glitch_ms: u32,
+    /// Частота случайного глитча — раз в N кадров в среднем. 0 = никогда.
+    /// Если glitch_intensity в [general] тоже учтится (произведение).
+    #[serde(default = "default_random_glitch_every_frames")]
+    pub random_glitch_every_frames: u32,
+
+    /// Скорость перебора символов: chars/sec для каждой анимации.
+    #[serde(default = "default_glitch_chars_per_sec")]
+    pub chars_per_sec: u32,
+    /// Скорость перебора для random glitch (обычно выше).
+    #[serde(default = "default_random_chars_per_sec")]
+    pub random_chars_per_sec: u32,
+
+    /// Использовать заглавные английские буквы (A-Z) в переборе.
+    #[serde(default = "default_true")]
+    pub glitch_use_alpha: bool,
+    /// Использовать квадраты с разной заливкой (FULL BLOCK, DARK SHADE, MEDIUM SHADE,
+    /// LIGHT SHADE, BLACK SQUARE, WHITE SQUARE, etc.) в переборе.
+    #[serde(default = "default_true")]
+    pub glitch_use_blocks: bool,
+    /// Использовать цифры в переборе (для большего MCD-стиля).
+    #[serde(default)]
+    pub glitch_use_digits: bool,
+    /// Цвет символов глитча (hex). По умолчанию = accent_cyan.
+    #[serde(default)]
+    pub glitch_color: Option<String>,
+}
+
+fn default_ws_transition_ms() -> u32 { 250 }
+fn default_ws_manifest_ms() -> u32 { 200 }
+fn default_ws_reveal_ms() -> u32 { 250 }
+fn default_new_window_fill_ms() -> u32 { 600 }
+fn default_new_window_reveal_ms() -> u32 { 250 }
+fn default_random_glitch_ms() -> u32 { 120 }
+fn default_random_glitch_every_frames() -> u32 { 360 }
+fn default_glitch_chars_per_sec() -> u32 { 60 }
+fn default_random_chars_per_sec() -> u32 { 220 }
+
+impl Default for AnimationsCfg {
+    fn default() -> Self {
+        AnimationsCfg {
+            workspace_transition: true,
+            new_window: true,
+            random_glitch: true,
+            ws_transition_ms: 250,
+            ws_manifest_ms: 200,
+            ws_reveal_ms: 250,
+            new_window_fill_ms: 600,
+            new_window_reveal_ms: 250,
+            random_glitch_ms: 120,
+            random_glitch_every_frames: 360,
+            chars_per_sec: 60,
+            random_chars_per_sec: 220,
+            glitch_use_alpha: true,
+            glitch_use_blocks: true,
+            glitch_use_digits: false,
+            glitch_color: None,
+        }
+    }
+}
+
+// ===== IPC =====
+
+/// Конфигурация IPC сокета (i3-msg совместимый протокол).
+///
+/// WM создаёт UNIX-доменный сокет по пути `socket_path`. Внешние утилиты
+/// (например `shtty-msg`) отправляют JSON-команды:
+///   { "type": "command", "cmd": "workspace 2" }
+///   { "type": "command", "cmd": "exec firefox" }
+///   { "type": "command", "cmd": "reload" }
+///   { "type": "get_workspaces" }
+///   { "type": "get_config" }
+///
+/// Ответ — JSON.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcCfg {
+    /// Включить IPC сокет.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Путь к сокету. Если пусто — $XDG_RUNTIME_DIR/superhot-tty.sock или
+    /// /tmp/superhot-tty-$UID.sock.
+    #[serde(default)]
+    pub socket_path: Option<String>,
+    /// Права на файл сокета (octal). 0600 = только владелец.
+    #[serde(default = "default_ipc_socket_mode")]
+    pub socket_mode: u32,
+}
+
+fn default_ipc_socket_mode() -> u32 { 0o600 }
+
+impl Default for IpcCfg {
+    fn default() -> Self {
+        IpcCfg {
+            enabled: true,
+            socket_path: None,
+            socket_mode: 0o600,
+        }
+    }
+}
+
 impl Config {
     /// Загружает конфиг из стандартных местоположений (XDG priority).
     pub fn load() -> Self {
@@ -510,8 +697,9 @@ impl Config {
             let p = expand_tilde(path);
             if let Ok(s) = std::fs::read_to_string(&p) {
                 match toml::from_str::<Config>(&s) {
-                    Ok(c) => {
+                    Ok(mut c) => {
                         log::info!("loaded config from {}", p);
+                        c._config_path = Some(std::path::PathBuf::from(p));
                         return c;
                     }
                     Err(e) => log::warn!("config parse error in {}: {}", p, e),
@@ -519,7 +707,31 @@ impl Config {
             }
         }
         log::warn!("no config.toml found, using defaults");
-        Config::default()
+        let mut c = Config::default();
+        c._config_path = None;
+        c
+    }
+
+    /// Перезагружает конфиг из того же пути что и в _config_path.
+    /// Если путь неизвестен — использует стандартный load().
+    /// Возвращает (new_config, changed_path).
+    pub fn reload(&self) -> Self {
+        if let Some(p) = &self._config_path {
+            if let Ok(s) = std::fs::read_to_string(p) {
+                match toml::from_str::<Config>(&s) {
+                    Ok(mut c) => {
+                        log::info!("reloaded config from {}", p.display());
+                        c._config_path = Some(p.clone());
+                        return c;
+                    }
+                    Err(e) => {
+                        log::warn!("config parse error on reload in {}: {}", p.display(), e);
+                        return self.clone();
+                    }
+                }
+            }
+        }
+        Self::load()
     }
 
     pub fn default_config_toml() -> &'static str {
@@ -563,6 +775,10 @@ impl Default for Config {
                     portal: PortalCfg::default(),
                     gamepad: GamepadCfg::default(),
                     x11: X11Cfg::default(),
+                    live_reload: LiveReloadCfg::default(),
+                    animations: AnimationsCfg::default(),
+                    ipc: IpcCfg::default(),
+                    _config_path: None,
                 }
             })
     }

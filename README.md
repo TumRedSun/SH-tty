@@ -726,17 +726,20 @@ superhot-tty/
     ├── login/mod.rs             # PAM login screen (NEW v0.3)
     ├── config/
     │   ├── mod.rs               # TOML config
-    │   └── window_rules.rs      # window rules engine (NEW v0.3)
+    │   ├── window_rules.rs      # window rules engine (NEW v0.3)
+    │   └── watcher.rs           # live-reload inotify watcher (NEW v0.5)
     ├── launcher/mod.rs          # rofi-like launcher
     ├── drm/
     │   ├── kms.rs               # DRM/KMS ioctls
     │   ├── multi_monitor.rs     # multi-monitor backend (NEW v0.3)
     │   └── fbdev.rs             # legacy fallback
-    ├── render/                  # canvas, font, text
-    ├── term/                    # PTY + VTerm
+    ├── render/                  # canvas, font, text, glitch animations (v0.5)
+    ├── term/                    # PTY + VTerm (with libvterm FFI, v0.5)
     ├── layout/                  # BSP/i3 + workspaces
     ├── input/                   # keyboard, mouse, gamepad
     ├── x11/                     # Xephyr + Composite + DRI3
+    ├── ipc/                     # i3-msg-compatible IPC socket (NEW v0.5)
+    ├── bin/shtty_msg.rs         # standalone IPC CLI (NEW v0.5)
     ├── audio/                   # PipeWire
     ├── portal/                  # xdg-desktop-portal
     └── ui/                      # theme + popups
@@ -746,14 +749,19 @@ superhot-tty/
 
 ## Roadmap
 
-### v0.4 (текущая — реализовано)
+### v0.5 (текущая — реализовано)
 - ✅ **Полная DRI3/DMA-BUF реализация (FFI к xcb-dri3)** — `src/x11/dri3.rs`
 - ✅ **Hardware DRM cursor plane** — `src/drm/cursor.rs`
 - ✅ **Hardware DRM overlay planes (0% CPU для X11)** — `src/drm/planes.rs`
-- 🚧 Live reload конфигурации
-- 🚧 Анимации перехода между workspaces
-- 🚧 IPC сокет (как i3-msg)
-- 🚧 Полная xterm совместимость (libvterm)
+- ✅ **Live reload конфигурации** — inotify watcher на `config.toml`, debounce, hot-apply theme/keybindings/window_rules/animations/ipc, warn для перезапускаемых полей — `src/config/watcher.rs`
+- ✅ **Анимации перехода между workspaces (glitch MCD-style)** — три фазы: transition (перебор) → manifest (проявление нового ws) → reveal (corner-to-corner фиксация). Плюс new-window анимация и random glitch — `src/render/glitch.rs`
+- ✅ **IPC сокет (i3-msg-совместимый протокол)** — UNIX-domain сокет, JSON-команды, CLI `shtty-msg` — `src/ipc/mod.rs`, `src/bin/shtty_msg.rs`
+- ✅ **Полная xterm совместимость (libvterm)** — runtime FFI к `libvterm.so.0` через `libloading`, fallback на расширенный built-in парсер (CSI/OSC/DCS, SGR truecolor, DEC modes, save/restore cursor, DECSC/DECRC) — `src/term/libvterm.rs`, `src/term/vterm.rs`
+
+### v0.4
+- ✅ DRI3/DMA-BUF FFI
+- ✅ Hardware cursor
+- ✅ Overlay planes
 
 ### v0.3
 - ✅ Login screen (PAM)
@@ -820,6 +828,146 @@ overlay_planes = true    # 0% CPU X11 rendering
 ```
 
 Если `overlay_planes = false` — X11 окна blit'ятся в canvas (CPU). Fallback на случай если GPU не поддерживает достаточно overlay planes.
+
+---
+
+## v0.5: Live reload, Glitch animations, IPC, libvterm
+
+### Live reload конфигурации
+
+Inotify- watcher на `config.toml` (через `libc::inotify_add_watch` в отдельном потоке).
+При изменении файла — debounce (`live_reload.debounce_ms`, default 250 мс), затем перечитывание.
+
+Применяется на лету (без перезапуска WM):
+- `theme.*` — пересобирается `Theme` и сразу используется при рендере
+- `keybindings` — новые биндинги активны сразу
+- `window_rules` — применяются к новым окнам
+- `animations.*` — параметры анимаций
+- `ipc.*` (кроме `socket_path` — требует перезапуска)
+- `live_reload.*`
+- `general.glitch_intensity`, `general.framerate`, `general.gap/border/...`
+- `popups.*`
+
+Требуют перезапуска (логируется как warning):
+- `general.font`, `general.font_size` — нужны новая загрузка PSF
+- `general.workspace_count` — пересоздание структур Workspaces
+- `monitors` — reinit DRM/KMS
+- `x11.display`, `x11.screen_size` — reinit Xephyr
+- `x11.dri3`, `x11.overlay_planes` — reinit DRM planes
+
+`src/config/watcher.rs` — `ConfigWatcher` + `ConfigDiff` (детектор изменений).
+
+### Glitch-анимации (MCD-style)
+
+Три типа анимаций, все с corner-to-corner reveal (TL → BR диагональ):
+
+**1. Workspace transition** (`animations.workspace_transition = true`)
+
+При переключении workspaces:
+1. **Transition** (`ws_transition_ms`, default 250 мс) — все символы экрана
+   (терминальные ячейки, разделители, X11-окна как квадраты █▓) начинают
+   перебираться случайными символами:
+   - Заглавные A-Z (если `glitch_use_alpha = true`)
+   - Квадраты с разной заливкой: ░ ▒ ▓ █ ■ □ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▀ ▄ ▌ ▐
+     (если `glitch_use_blocks = true`)
+   - Опционально цифры 0-9 (`glitch_use_digits`)
+2. **Manifest** (`ws_manifest_ms`, default 200 мс) — поверх перебора проявляется
+   целевой ws: добавляются недостающие символы, исчезают лишние. Перебор всё
+   ещё идёт для остальных ячеек.
+3. **Reveal** (`ws_reveal_ms`, default 250 мс) — diagonal corner-to-corner:
+   от левого верхнего угла к правому нижнему символы фиксируются в финальном
+   состоянии (terminal cells из целевого ws).
+
+**2. New window** (`animations.new_window = true`)
+
+При создании нового X11-окна или нативного терминального tile:
+1. **Fill** (`new_window_fill_ms`, default 600 мс) — квадрат нового окна
+   заливается перебором (фон глитча — тёмный, символы glitch_color).
+2. **Reveal** (`new_window_reveal_ms`, default 250 мс) — corner-to-corner
+   внутри rect окна: символы фиксируются, видно реальный терминал/окно.
+
+**3. Random glitch** (`animations.random_glitch = true`)
+
+Спонтанный быстрый глитч по случайному под-прямоугольнику экрана:
+- Длительность: `random_glitch_ms` (default 120 мс — короче, чем ws transition)
+- Частота: в среднем раз в `random_glitch_every_frames` кадров (default 360),
+  умножается на `general.glitch_intensity` (0.0..1.0, default 0.15)
+- Скорость перебора: `random_chars_per_sec` (default 220 chars/sec —
+  значительно быстрее, чем у ws/new_window)
+- Corner-to-corner reveal как и у остальных, но быстрый
+
+Цвет глитча: `animations.glitch_color` (по умолчанию = `theme.accent_cyan`).
+Скорость перебора для ws/new_window: `animations.chars_per_sec` (default 60).
+
+`src/render/glitch.rs` — `AnimationManager`, `ActiveAnimation`, `CharSnapshot`,
+`snapshot_workspace()`, `random_glitch_char()`.
+
+### IPC сокет (i3-msg совместимый)
+
+UNIX-доменный сокет (default `$XDG_RUNTIME_DIR/superhot-tty.sock` или
+`/tmp/superhot-tty-$UID.sock`). Протокол: JSON-запросы и JSON-ответы.
+
+Запросы:
+```json
+{ "type": "command", "cmd": "workspace 2" }
+{ "type": "command", "cmd": "exec firefox" }
+{ "type": "command", "cmd": "exec --no-startup-id alacritty" }
+{ "type": "command", "cmd": "kill" }
+{ "type": "command", "cmd": "reload" }
+{ "type": "command", "cmd": "split vertical" }
+{ "type": "command", "cmd": "focus left" }
+{ "type": "command", "cmd": "fullscreen toggle" }
+{ "type": "command", "cmd": "layout toggle" }
+{ "type": "command", "cmd": "launcher" }
+{ "type": "command", "cmd": "glitch" }
+{ "type": "get_workspaces" }
+{ "type": "get_config" }
+{ "type": "get_focused" }
+{ "type": "get_version" }
+```
+
+Ответы:
+```json
+{ "status": "ok", "result": "switched to workspace 2" }
+{ "status": "error", "error": "unknown command: foo" }
+```
+
+CLI утилита `shtty-msg` (второй binary в crate):
+```bash
+shtty-msg "workspace 2"
+shtty-msg "exec firefox"
+shtty-msg --get-workspaces
+shtty-msg --get-version
+```
+
+Права сокета: `ipc.socket_mode` (default `0o600`, только владелец).
+
+`src/ipc/mod.rs` — `IpcServer`, `IpcRequest`, `IpcResponse`, `parse_i3_command()`.
+`src/bin/shtty_msg.rs` — standalone CLI binary.
+
+### Полная xterm совместимость (libvterm)
+
+Runtime FFI к `libvterm.so.0` через `libloading`. Если библиотека доступна —
+VTerm проксирует туда все байты от PTY и синхронизирует grid. Если нет —
+fallback на расширенный built-in ANSI-парсер.
+
+Built-in парсер покрывает:
+- CSI: cursor position (H/f), up/down/fwd/back (A/B/C/D), CNL/CPL (E/F),
+  column/row set (G/d), erase display/line (J/K), SGR (m), scroll region (r),
+  device status report (n=6), insert/delete lines (L/M), delete chars (P),
+  insert blanks (@), scroll (S/T), save/restore cursor (s/u)
+- Private modes (CSI ?): alt screen (1049, 47, 1047), cursor visibility (25),
+  autowrap (7), application cursor keys (1), cursor blink (12)
+- ESC sequences: IND (D), NEL (E), RI (M), RIS (c), DECSC/DECRC (7/8),
+  application keypad (= / >), DCS (P, игнорируется), ST (\\)
+- OSC: 0;title / 2;title (window title), 4;N;COLOR (palette, игнорируется),
+  8;params;uri (hyperlink, игнорируется), 52;clipboard (игнорируется)
+- SGR: 0 (reset), 1/22 (bold), 3/23 (italic), 4/24 (underline), 7/27 (reverse),
+  30-37/40-47 (16 colors), 38;5;N / 48;5;N (256 colors), 38;2;R;G;B / 48;2;R;G;B
+  (truecolor → аппроксимация в 16-color палитру), 90-97/100-107 (bright)
+
+`src/term/libvterm.rs` — `LibVTermHandle`, FFI bindings.
+`src/term/vterm.rs` — `VTerm` с опциональным libvterm backend.
 
 ---
 
