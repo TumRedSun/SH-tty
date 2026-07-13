@@ -1,8 +1,8 @@
 [package]
 name = "superhot-tty"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "SuperHot MCD-styled TTY window manager with X11 tile embedding, GPU acceleration, gamepad, portal"
+description = "SuperHot MCD-styled TTY window manager with login screen, multi-monitor, window rules, autostart"
 authors = ["superhot-tty contributors"]
 license = "MIT"
 

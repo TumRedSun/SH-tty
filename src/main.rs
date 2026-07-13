@@ -1,11 +1,13 @@
-//! superhot-tty — SuperHot MCD-styled TTY window manager.
+//! superhot-tty v0.3 — SuperHot MCD-styled TTY window manager.
 //!
-//! v0.2: конфиг TOML, workspaces, launcher, mouse+XTest, gamepad, PipeWire,
-//! xdg-desktop-portal screen share, DMA-BUF/DRI3 GPU-ускорение X11.
-//!
-//! Запускается как замена agetty. Открывает DRM/KMS backend (fallback на fbdev),
-//! создаёт первый терминальный тайл с shell, и обрабатывает ввод с клавиатуры
-//! через evdev. Mod4 = Super — модификатор для всех хоткеев.
+//! Полный стек:
+//!   1. Login screen (PAM) → аутентификация пользователя
+//!   2. Загрузка пользовательского конфига (~/.config/SH-tty/config.toml)
+//!   3. Multi-monitor DRM/KMS init (per-monitor workspace binding)
+//!   4. Autostart commands из конфига
+//!   5. Event loop: keyboard/mouse/gamepad → actions → render → flip
+//!   6. Window rules engine для авто-placement X11 окон
+//!   7. Launcher (.desktop scanner) — Terminal=true → native terminal tile
 
 mod drm;
 mod render;
@@ -18,18 +20,23 @@ mod config;
 mod launcher;
 mod audio;
 mod portal;
+mod login;
 
 use anyhow::{Context, Result};
-use drm::Backend;
-use layout::{Direction, FocusDir, Layout, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
-use render::{Canvas, Font, TextRenderer};
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
+use std::process::Command;
 use std::time::{Duration, Instant};
+
+use config::Config;
+use drm::{Backend, MultiMonitorBackend};
+use layout::{Direction, FocusDir, Layout, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
+use render::{Canvas, Font, TextRenderer};
 use term::{Pty, VTerm};
 use ui::{Theme, Popup, PixelFmt, Color};
 use input::{Keyboard, Key, KeyEvent};
-use config::Config;
+use config::window_rules::{WindowRuleEngine, PlacementCache, WindowInfo};
+use login::LoginScreen;
 
 struct TerminalTile {
     pub pty: Pty,
@@ -42,72 +49,176 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
-    log::info!("superhot-tty v0.2 starting");
-
-    let cfg = Config::load();
+    log::info!("superhot-tty v0.3 starting");
 
     if unsafe { libc::geteuid() } != 0 {
-        log::warn!("not running as root — DRM master may fail");
+        log::warn!("not running as root — DRM master and PAM may fail");
     }
 
-    let mut backend = Backend::open(None, None).context("failed to open graphics backend")?;
-    let (w, h) = backend.dimensions();
-    let bpp = backend.bpp();
-    let fmt = if bpp == 16 { PixelFmt::Rgb565 } else { PixelFmt::Xrgb8888 };
-    log::info!("backend: {}x{} {}bpp", w, h, bpp);
+    // 1. Открываем DRM/KMS backend (multi-monitor если конфиг есть).
+    let cfg_system = Config::load();
+    let multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log::warn!("Multi-monitor init failed: {} — falling back to single DRM", e);
+            None
+        }
+    };
 
-    let canvas = Canvas::new(w, h, fmt);
+    // 2. Fallback на single-monitor Backend.
+    let mut single_backend = if multi_backend.is_none() {
+        Some(Backend::open(None, None).context("failed to open graphics backend")?)
+    } else {
+        None
+    };
+
+    // 3. Шрифт + canvas для login screen.
+    let (canvas_w, canvas_h) = if let Some(mb) = &multi_backend {
+        let m = mb.primary_monitor();
+        (m.width, m.height)
+    } else if let Some(sb) = &single_backend {
+        sb.dimensions()
+    } else {
+        anyhow::bail!("no graphics backend");
+    };
+
+    let fmt = PixelFmt::Xrgb8888;
+    let canvas = Canvas::new(canvas_w, canvas_h, fmt);
     let font = Font::load_default();
+    let theme = build_theme(&cfg_system);
     let keyboard = Keyboard::open().context("opening keyboard")?;
+
+    // 4. Login screen loop.
+    let mut login_screen = LoginScreen::new();
+    let mut quit_wm = false;
+
+    login_loop(
+        &mut login_screen,
+        &multi_backend,
+        single_backend.as_mut(),
+        &canvas,
+        &font,
+        &theme,
+        keyboard,
+        &cfg_system,
+        &mut quit_wm,
+    )?;
+
+    if quit_wm {
+        log::info!("user quit login screen, exiting");
+        return Ok(());
+    }
+
+    // 5. Переключаемся на пользователя.
+    let uid = login_screen.uid;
+    let gid = login_screen.gid;
+    let home_dir = login_screen.home_dir.clone();
+    if let Some(user) = &login_screen.authenticated_user {
+        log::info!("authenticated as: {} (uid={}, gid={})", user, uid, gid);
+    }
+    login::switch_to_user(uid, gid, &home_dir)
+        .context("failed to switch user context")?;
+
+    // 6. Загружаем пользовательский конфиг (после switch_to_user, чтобы $HOME был правильный).
+    let cfg = Config::load();
     let theme = build_theme(&cfg);
 
-    let mut layout = Layout::new();
-    layout.gap = cfg.general.gap;
-    layout.border = cfg.general.border;
-    layout.padding_outer = cfg.general.outer_padding;
+    // 7. Запускаем основной WM.
+    run_wm(
+        multi_backend,
+        single_backend,
+        canvas,
+        font,
+        theme,
+        cfg,
+        &mut quit_wm,
+    )?;
 
+    log::info!("superhot-tty shutting down");
+    Ok(())
+}
+
+/// Login screen loop — показываем themed MCD login до успешной аутентификации.
+fn login_loop(
+    login_screen: &mut LoginScreen,
+    multi_backend: &Option<MultiMonitorBackend>,
+    mut single_backend: Option<&mut Backend>,
+    canvas: &Canvas,
+    font: &Font,
+    theme: &Theme,
+    mut keyboard: Keyboard,
+    cfg: &Config,
+    quit_wm: &mut bool,
+) -> Result<()> {
+    let target_fps = cfg.general.framerate.max(1) as u64;
+    let frame_dur = Duration::from_millis(1000 / target_fps);
+
+    loop {
+        let frame_start = Instant::now();
+
+        // Keyboard.
+        let events = keyboard.poll();
+        for ev in events {
+            if let KeyEvent::Press(key) = ev {
+                let key_str = key_to_string(&key);
+                login_screen.handle_key(&key_str, keyboard.shift, keyboard.ctrl);
+
+                // Если мы в состоянии Authenticating — вызываем PAM.
+                if login_screen.state == login::LoginState::Authenticating {
+                    let _ = login_screen.try_authenticate(&cfg.login.pam_service);
+                }
+                if login_screen.state == login::LoginState::Quit {
+                    *quit_wm = true;
+                    return Ok(());
+                }
+                if login_screen.state == login::LoginState::Success {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Render login screen.
+        login_screen.render(canvas, font, theme, &cfg.login, canvas.width, canvas.height);
+
+        // Blit + flip.
+        blit_to_backend(canvas, multi_backend, single_backend.as_deref_mut());
+        flip_backend(multi_backend, single_backend.as_deref_mut())?;
+
+        // Framerate cap.
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_dur {
+            std::thread::sleep(frame_dur - elapsed);
+        }
+    }
+}
+
+/// Основной WM после login.
+#[allow(clippy::too_many_arguments)]
+fn run_wm(
+    multi_backend: Option<MultiMonitorBackend>,
+    mut single_backend: Option<Backend>,
+    canvas: Canvas,
+    font: Font,
+    theme: Theme,
+    cfg: Config,
+    quit_wm: &mut bool,
+) -> Result<()> {
     // Workspaces.
     let mut names = HashMap::new();
     for ws in &cfg.workspaces {
         names.insert(ws.n, ws.name.clone());
     }
-    let mut workspaces = Workspaces::new(9, names);
-
-    // Первый терминал.
-    let mut terminals: HashMap<LeafId, TerminalTile> = HashMap::new();
-    let first_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
-    let cols = ((w as i32 - layout.padding_outer * 2 - layout.border * 2 - 8) / font.width as i32).max(1) as u16;
-    let rows = ((h as i32 - layout.padding_outer * 2 - layout.border * 2 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
-    let pty = Pty::spawn(cols, rows, Some(&cfg.general.shell))?;
-    set_nonblocking(pty.master_fd);
-    let vterm = VTerm::new(cols, rows);
-    terminals.insert(first_id, TerminalTile {
-        pty, vterm,
-        title: cfg.general.shell.clone(),
-        workspace: 1,
-    });
-
-    // X11 compositor.
-    let x11 = match x11::X11Compositor::start(1, cfg.x11.screen_size) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log::warn!("X11 compositor not started: {} — X11 tile embedding disabled.\n\
-                       Install xorg-server-xephyr to enable.", e);
-            None
-        }
-    };
+    let max_ws = cfg.general.workspace_count.max(1);
+    let mut workspaces = Workspaces::new(max_ws, names);
 
     // Mouse.
-    let mut mouse = match input::Mouse::open(w, h) {
-        Ok(m) => {
-            log::info!("mouse initialized");
-            Some(m)
-        }
+    let mut mouse = match input::Mouse::open(canvas.width, canvas.height) {
+        Ok(m) => { set_nonblocking(m.fd); Some(m) }
         Err(e) => { log::warn!("mouse not available: {}", e); None }
     };
-    if let Some(m) = mouse.as_ref() {
-        set_nonblocking(m.fd);
-    }
+
+    // Keyboard.
+    let mut keyboard = Keyboard::open().context("opening keyboard for WM")?;
 
     // Gamepad.
     let mut gamepad = match input::GamepadManager::new(
@@ -119,101 +230,118 @@ fn main() -> Result<()> {
         Err(e) => { log::warn!("gamepad init failed: {}", e); input::GamepadManager::new(HashMap::new(), 50, false).unwrap() }
     };
 
-    // Audio stack (PipeWire).
+    // X11 compositor.
+    let mut x11 = match x11::X11Compositor::start(1, cfg.x11.screen_size) {
+        Ok(c) => Some(c),
+        Err(e) => { log::warn!("X11 not started: {}", e); None }
+    };
+
+    // Audio.
     let _audio = if cfg.audio.start_pipewire_pulse || cfg.audio.start_wireplumber {
-        match audio::AudioStack::start(cfg.audio.start_pipewire_pulse, cfg.audio.start_wireplumber) {
-            Ok(a) => Some(a),
-            Err(e) => { log::warn!("audio stack failed: {}", e); None }
-        }
+        audio::AudioStack::start(cfg.audio.start_pipewire_pulse, cfg.audio.start_wireplumber).ok()
     } else { None };
 
-    // Portal backend (запуск в отдельном tokio runtime).
+    // Portal.
     let _portal_handle = if cfg.portal.start_portal {
-        let service_name = cfg.portal.service_name.clone();
-        let object_path = cfg.portal.object_path.clone();
+        let sn = cfg.portal.service_name.clone();
+        let op = cfg.portal.object_path.clone();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(r) => r,
-                Err(e) => { log::warn!("tokio rt: {}", e); return; }
-            };
+            let rt = match tokio::runtime::Runtime::new() { Ok(r) => r, Err(_) => return };
             rt.block_on(async move {
-                match portal::PortalBackend::start(service_name, object_path).await {
-                    Ok(_) => {
-                        log::info!("portal backend running");
-                        // Держим поток живым.
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                        }
-                    }
-                    Err(e) => log::warn!("portal backend failed: {}", e),
+                if let Err(e) = portal::PortalBackend::start(sn, op).await {
+                    log::warn!("portal backend failed: {}", e);
+                } else {
+                    loop { tokio::time::sleep(Duration::from_secs(60)).await; }
                 }
             });
         })
     } else { std::thread::spawn(|| {}) };
 
+    // Window rules engine.
+    let rule_engine = WindowRuleEngine::new(&cfg);
+    let mut placement_cache = PlacementCache::new();
+
+    // Terminals + layout.
+    let mut terminals: HashMap<LeafId, TerminalTile> = HashMap::new();
+    // Создаём первый терминал на активном workspace.
+    let first_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
+    let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
+    let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
+    if let Ok(pty) = Pty::spawn(cols, rows, Some(&cfg.general.shell)) {
+        set_nonblocking(pty.master_fd);
+        terminals.insert(first_id, TerminalTile {
+            pty,
+            vterm: VTerm::new(cols, rows),
+            title: cfg.general.shell.clone(),
+            workspace: workspaces.current,
+        });
+    }
+
     // Launcher.
     let mut launcher = launcher::Launcher::new(&cfg.launcher.desktop_paths, &cfg.launcher.custom_entries);
 
-    run_event_loop(
-        backend, canvas, font, theme, keyboard, mouse.as_mut(),
-        layout, workspaces, terminals, x11, gamepad, launcher, cfg,
-    )
-}
+    // Autostart.
+    log::info!("running {} autostart entries", cfg.autostart.len());
+    for entry in cfg.autostart.clone() {
+        std::thread::spawn(move || {
+            if entry.delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(entry.delay_ms));
+            }
+            let _ = run_autostart(&entry);
+        });
+    }
 
-#[allow(clippy::too_many_arguments)]
-fn run_event_loop(
-    mut backend: Backend,
-    canvas: Canvas,
-    font: Font,
-    theme: Theme,
-    mut keyboard: Keyboard,
-    mut mouse: Option<&mut input::Mouse>,
-    layout: Layout,
-    mut workspaces: Workspaces,
-    mut terminals: HashMap<LeafId, TerminalTile>,
-    mut x11: Option<x11::X11Compositor>,
-    mut gamepad: input::GamepadManager,
-    mut launcher: launcher::Launcher,
-    cfg: Config,
-) -> Result<()> {
+    // Popups.
     let mut popups: Vec<Popup> = Vec::new();
-    let mut quit = false;
+    popups.push(Popup::info(
+        &format!("SUPERHOT TTY v0.3 — {} | Mod4+D launcher | Mod4+1..0 workspaces",
+            cfg.login.effective_title()),
+        canvas.width, canvas.height,
+    ));
+
     let mut resize_mode = false;
     let mut pending_x11_tile: Option<LeafId> = None;
-    let _ = layout;
 
-    popups.push(Popup::info("SUPERHOT TTY v0.2 — Mod4+D launcher | Mod4+1..9 workspaces | Mod4+Enter term",
-        canvas.width, canvas.height));
-
-    while !quit {
+    while !*quit_wm {
         let frame_start = Instant::now();
 
-        // 1. Клавиатура.
+        // 1. Keyboard.
         let events = keyboard.poll();
         for ev in events {
             match ev {
                 KeyEvent::Press(key) | KeyEvent::Repeat(key) => {
-                    // Launcher priority.
                     if launcher.visible {
                         let key_str = key_to_string(&key);
                         if let Some(idx) = launcher.handle_key(&key_str) {
                             let entry = launcher.entries[idx].clone();
                             let display = cfg.x11.display.clone();
-                            // Запускаем в отдельном потоке чтобы не блокировать event loop.
+                            let shell = cfg.launcher.terminal_shell.clone();
                             std::thread::spawn(move || {
-                                let _ = launcher::Launcher::launch(&entry, &display);
+                                let _ = launcher::Launcher::launch(&entry, &display, &shell);
                             });
-                            // Создаём X11 tile для нового окна.
-                            if x11.is_some() {
+                            // Если графическое — создаём X11 tile.
+                            if !entry.is_terminal && x11.is_some() {
                                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
                                 pending_x11_tile = Some(new_id);
+                            } else if entry.is_terminal {
+                                // Терминальное приложение — создаём нативный терминал.
+                                let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
+                                if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
+                                    set_nonblocking(pty.master_fd);
+                                    terminals.insert(new_id, TerminalTile {
+                                        pty,
+                                        vterm: VTerm::new(cols.min(200), rows.min(80)),
+                                        title: entry.name.clone(),
+                                        workspace: workspaces.current,
+                                    });
+                                }
                             }
                         }
                         continue;
                     }
                     if keyboard.super_ {
                         handle_hotkey(key, &mut workspaces, &mut terminals, &mut x11,
-                            &mut popups, &mut quit, &mut resize_mode, &mut pending_x11_tile,
+                            &mut popups, quit_wm, &mut resize_mode, &mut pending_x11_tile,
                             &canvas, &font, &keyboard, &mut launcher, &cfg)?;
                     } else if resize_mode {
                         let dir = match key {
@@ -248,11 +376,9 @@ fn run_event_loop(
         for gk in gp_events {
             if let Some(focused_id) = workspaces.current_layout().focused {
                 if let Some(tile) = terminals.get_mut(&focused_id) {
-                    // Конвертируем gamepad key в строку.
                     let key_str = match gk {
                         input::GamepadKey::Press(s) | input::GamepadKey::Release(s) => s,
                     };
-                    // Мапим в escape sequences.
                     let seq = match key_str.as_str() {
                         "Return" => Some("\r"),
                         "Escape" => Some("\x1B"),
@@ -279,44 +405,63 @@ fn run_event_loop(
         }
 
         // 4. PTY reads.
-        let mut buf = [0u8; 8192];
-        let _ = buf;
-        // Читаем только тайлы текущего workspace.
         let current_ws = workspaces.current;
-        for (id, tile) in terminals.iter_mut() {
+        for (_id, tile) in terminals.iter_mut() {
             if tile.workspace != current_ws { continue; }
             loop {
-                let mut local_buf = [0u8; 8192];
-                match tile.pty.read(&mut local_buf) {
+                let mut buf = [0u8; 8192];
+                match tile.pty.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let response = tile.vterm.feed(&local_buf[..n]);
+                        let response = tile.vterm.feed(&buf[..n]);
                         if let Some(resp) = response {
                             let _ = tile.pty.write(resp.as_bytes());
                         }
-                        if n < local_buf.len() { break; }
+                        if n < buf.len() { break; }
                     }
-                    Err(e) => {
-                        let s = e.to_string();
-                        if s.contains("EAGAIN") || s.contains("resource temporarily") || s.contains("Would block") {
-                            break;
-                        }
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
-            let _ = id;
         }
 
-        // 5. X11 poll.
+        // 5. X11 poll + auto-place windows.
         if let Some(x) = x11.as_mut() {
             if let Ok(new_windows) = x.poll_events() {
                 for xid in new_windows {
+                    log::info!("new X11 window: 0x{:x}", xid);
+                    // Получаем WM_CLASS для window rules.
+                    let info = get_window_info(x, xid);
+                    let placement = rule_engine.match_window(&info);
+                    log::info!("window 0x{:x} placement: ws={:?} focus={} fs={}",
+                        xid, placement.workspace, placement.focus, placement.fullscreen);
+
+                    if placement.skip_auto_place {
+                        continue;
+                    }
+
+                    // Если pending_x11_tile — привязываем к нему (launcher/manual spawn).
                     if let Some(leaf_id) = pending_x11_tile.take() {
                         x.bind_window_to_tile(leaf_id.0, x11::XWindowId(xid));
+                        placement_cache.mark_placed(xid, placement);
+                        continue;
+                    }
+
+                    // Auto-place по window rules.
+                    if cfg.x11.auto_place_windows {
+                        // Если правило указывает workspace — переключаемся.
+                        if let Some(ws) = placement.workspace {
+                            if ws != workspaces.current {
+                                workspaces.switch_to(ws);
+                            }
+                        }
+                        // Создаём X11 tile.
+                        let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
+                        x.bind_window_to_tile(new_id.0, x11::XWindowId(xid));
+                        placement_cache.mark_placed(xid, placement);
                     }
                 }
             }
+            // Refresh backings.
             let bindings: Vec<(u64, x11::XWindowId)> = x.tile_bindings.iter()
                 .map(|(k, v)| (*k, *v)).collect();
             for (_, xwid) in bindings {
@@ -325,16 +470,15 @@ fn run_event_loop(
         }
 
         // 6. Render.
-        render_frame(&backend, &canvas, &font, &theme, &workspaces, &terminals, &x11, &popups, &launcher, &cfg);
+        render_frame(&canvas, &font, &theme, &workspaces, &terminals, &x11, &popups, &launcher, &cfg, mouse.as_ref());
 
         // 7. Flip.
-        if let Err(e) = backend.flip() {
-            log::warn!("flip failed: {}", e);
-        }
+        blit_to_backend(&canvas, &multi_backend, single_backend.as_deref_mut());
+        flip_backend(&multi_backend, single_backend.as_mut())?;
 
         // 8. Popups tick.
         for p in popups.iter_mut() { p.tick(); }
-        popups.retain(|p| p.age < 240);
+        popups.retain(|p| p.age < cfg.popups.duration_frames);
 
         // 9. Framerate.
         let elapsed = frame_start.elapsed();
@@ -344,7 +488,74 @@ fn run_event_loop(
         }
     }
 
-    log::info!("superhot-tty shutting down");
+    Ok(())
+}
+
+/// Получает WM_CLASS и WM_NAME для window rules matching.
+fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{get_property, get_atom_name, ConnectionExt};
+    let conn = &x.conn;
+    // WM_CLASS atom.
+    let wm_class_atom = conn.intern_atom(false, b"WM_CLASS").ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.atom);
+    let wm_name_atom = conn.intern_atom(false, b"WM_NAME").ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.atom);
+
+    let class = if let Some(atom) = wm_class_atom {
+        get_property(conn, false, xid, atom, x11rb::protocol::xproto::AtomEnum::STRING.into(), 0, 1024)
+            .ok().and_then(|c| c.reply().ok())
+            .and_then(|r| String::from_utf8(r.value).ok())
+            .and_then(|s| s.split('\0').nth(1).map(|s| s.to_string()))
+            .unwrap_or_default()
+    } else { String::new() };
+
+    let title = if let Some(atom) = wm_name_atom {
+        get_property(conn, false, xid, atom, x11rb::protocol::xproto::AtomEnum::STRING.into(), 0, 1024)
+            .ok().and_then(|c| c.reply().ok())
+            .and_then(|r| String::from_utf8(r.value).ok())
+            .unwrap_or_default()
+    } else { String::new() };
+
+    WindowInfo {
+        class,
+        title,
+        app_id: String::new(),
+    }
+}
+
+/// Запускает autostart entry.
+fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
+    match entry.kind.as_str() {
+        "command" => {
+            Command::new(&entry.cmd).args(&entry.args).spawn()?;
+            log::info!("autostart (command): {}", entry.cmd);
+        }
+        "x11" => {
+            let mut c = Command::new(&entry.cmd);
+            c.args(&entry.args)
+                .env("DISPLAY", ":1")
+                .env("XDG_SESSION_TYPE", "x11")
+                .env("XDG_CURRENT_DESKTOP", "superhot");
+            c.spawn()?;
+            log::info!("autostart (x11): {}", entry.cmd);
+        }
+        "terminal" => {
+            let full_cmd = if entry.args.is_empty() {
+                entry.cmd.clone()
+            } else {
+                format!("{} {}", entry.cmd, entry.args.join(" "))
+            };
+            let mut c = Command::new("zsh");
+            c.args(["-c", &format!("exec {}", full_cmd)])
+                .env("TERM", "xterm-256color");
+            c.spawn()?;
+            log::info!("autostart (terminal): {}", full_cmd);
+        }
+        other => log::warn!("unknown autostart type: {}", other),
+    }
     Ok(())
 }
 
@@ -364,65 +575,37 @@ fn handle_hotkey(
     launcher: &mut launcher::Launcher,
     cfg: &Config,
 ) -> Result<()> {
-    let _ = keyboard;
-    // Поиск биндинга в конфиге.
+    let _ = (font, canvas);
     let key_str = key_to_string(&key);
+    // Поиск биндинга в конфиге.
     let mut matched_action = None;
     for b in &cfg.keybindings {
-        if b.key.to_lowercase() != key_str.to_lowercase() { continue; }
-        let mods_match =
-            b.mods.iter().all(|m| match m.as_str() {
-                "Super" => keyboard.super_,
-                "Ctrl" => keyboard.ctrl,
-                "Alt" => keyboard.alt,
-                "Shift" => keyboard.shift,
-                _ => false,
-            });
-        if mods_match {
+        if !key_str_eq(&b.key, &key_str) { continue; }
+        let mods_match = b.mods.iter().all(|m| match m.as_str() {
+            "Super" => keyboard.super_,
+            "Ctrl" => keyboard.ctrl,
+            "Alt" => keyboard.alt,
+            "Shift" => keyboard.shift,
+            _ => false,
+        });
+        if mods_match && b.mods.len() == count_mods(keyboard) {
             matched_action = Some(b.action.clone());
             break;
         }
     }
-
     if let Some(action) = matched_action {
         execute_action(action, workspaces, terminals, x11, popups, quit, resize_mode,
             pending_x11_tile, canvas, font, launcher, cfg)?;
-    } else {
-        // Fallback на старые hotkeys если не нашли в конфиге.
-        match key {
-            Key::Enter => spawn_term(workspaces, terminals, Direction::Horizontal, canvas, font, cfg),
-            Key::Char('d') | Key::Char('D') => launcher.toggle(),
-            Key::Char('v') | Key::Char('V') => spawn_term(workspaces, terminals, Direction::Vertical, canvas, font, cfg),
-            Key::Char('h') | Key::Char('H') => workspaces.current_layout_mut().focus(FocusDir::Left),
-            Key::Char('j') | Key::Char('J') => workspaces.current_layout_mut().focus(FocusDir::Down),
-            Key::Char('k') | Key::Char('K') => workspaces.current_layout_mut().focus(FocusDir::Up),
-            Key::Char('l') | Key::Char('L') => workspaces.current_layout_mut().focus(FocusDir::Right),
-            Key::Char('q') | Key::Char('Q') => close_focused(workspaces, terminals, x11),
-            Key::Char('f') | Key::Char('F') => workspaces.current_layout_mut().toggle_fullscreen(),
-            Key::Space => workspaces.current_layout_mut().focus_cycle(),
-            Key::Char('r') | Key::Char('R') => {
-                *resize_mode = !*resize_mode;
-                popups.push(Popup::info(
-                    if *resize_mode { "RESIZE — HJKL to resize, Esc to exit" }
-                    else { "resize mode off" },
-                    canvas.width, canvas.height));
-            }
-            Key::Char('e') | Key::Char('E') => {
-                if keyboard.shift { *quit = true; return Ok(()); }
-                // open X11 tile.
-                if x11.is_none() {
-                    popups.push(Popup::info("X11 not available (install xorg-server-xephyr)", canvas.width, canvas.height));
-                    return Ok(());
-                }
-                let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
-                *pending_x11_tile = Some(new_id);
-                popups.push(Popup::info("Run: DISPLAY=:1 discord", canvas.width, canvas.height));
-            }
-            Key::Escape => { *resize_mode = false; popups.clear(); }
-            _ => {}
-        }
     }
     Ok(())
+}
+
+fn count_mods(kb: &Keyboard) -> usize {
+    [kb.super_, kb.ctrl, kb.alt, kb.shift].iter().filter(|&&b| b).count()
+}
+
+fn key_str_eq(cfg_key: &str, actual: &str) -> bool {
+    cfg_key.eq_ignore_ascii_case(actual)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -448,22 +631,34 @@ fn execute_action(
         CfgDir::Up => FocusDir::Up,
         CfgDir::Down => FocusDir::Down,
     };
-    let split_dir = |d: CfgDir| match d {
-        CfgDir::Left | CfgDir::Right => Direction::Horizontal,
-        CfgDir::Up | CfgDir::Down => Direction::Vertical,
-    };
     match action {
         Terminal => spawn_term(workspaces, terminals, Direction::Horizontal, canvas, font, cfg),
         Launcher => launcher.toggle(),
-        Spawn { cmd, args } => {
-            let _ = std::process::Command::new(&cmd).args(&args).spawn();
-        }
+        Spawn { cmd, args } => { let _ = Command::new(&cmd).args(&args).spawn(); }
         SpawnX11 { cmd, args } => {
             if let Some(x) = x11.as_mut() {
                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
                 *pending_x11_tile = Some(new_id);
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 let _ = x.launch_client(&cmd, &args_ref);
+            }
+        }
+        SpawnTerminal { cmd, args } => {
+            let full = match cmd {
+                Some(c) => if args.is_empty() { c } else { format!("{} {}", c, args.join(" ")) },
+                None => cfg.general.shell.clone(),
+            };
+            let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
+            let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
+            let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
+            if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
+                set_nonblocking(pty.master_fd);
+                terminals.insert(new_id, TerminalTile {
+                    pty,
+                    vterm: VTerm::new(cols.min(200), rows.min(80)),
+                    title: full,
+                    workspace: workspaces.current,
+                });
             }
         }
         SplitHorizontal => spawn_term(workspaces, terminals, Direction::Horizontal, canvas, font, cfg),
@@ -488,8 +683,25 @@ fn execute_action(
         TabNext | TabPrev | ToggleLayout | Reload => {
             popups.push(Popup::info(&format!("action {:?} not implemented yet", action), canvas.width, canvas.height));
         }
+        PopupScript { cmd, args } => {
+            // Запускаем скрипт, перехватываем stdout, показываем в popup.
+            let output = std::process::Command::new(&cmd)
+                .args(&args)
+                .output();
+            match output {
+                Ok(o) => {
+                    let text = String::from_utf8_lossy(&o.stdout).to_string();
+                    popups.push(Popup::script(&text, canvas.width, canvas.height));
+                }
+                Err(e) => {
+                    popups.push(Popup::info(&format!("script error: {}", e), canvas.width, canvas.height));
+                }
+            }
+        }
+        Popup { text } => {
+            popups.push(Popup::script(&text, canvas.width, canvas.height));
+        }
     }
-    let _ = split_dir;
     Ok(())
 }
 
@@ -501,25 +713,19 @@ fn spawn_term(
     font: &Font,
     cfg: &Config,
 ) {
-    let layout = workspaces.current_layout_mut();
-    let cols = ((canvas.width as i32 - layout.padding_outer * 2 - layout.border * 2 - 8) / font.width as i32).max(1) as u16;
-    let rows = ((canvas.height as i32 - layout.padding_outer * 2 - layout.border * 2 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
-    let new_id = layout.open_tile(TileKind::Terminal, dir);
-    match Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
-        Ok(pty) => {
-            set_nonblocking(pty.master_fd);
-            terminals.insert(new_id, TerminalTile {
-                pty,
-                vterm: VTerm::new(cols.min(200), rows.min(80)),
-                title: cfg.general.shell.clone(),
-                workspace: workspaces.current,
-            });
-            log::info!("new terminal tile: {:?} on ws {}", new_id, workspaces.current);
-        }
-        Err(e) => {
-            log::error!("pty spawn: {}", e);
-            workspaces.current_layout_mut().close_leaf(new_id);
-        }
+    let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
+    let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
+    let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, dir);
+    if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
+        set_nonblocking(pty.master_fd);
+        terminals.insert(new_id, TerminalTile {
+            pty,
+            vterm: VTerm::new(cols.min(200), rows.min(80)),
+            title: cfg.general.shell.clone(),
+            workspace: workspaces.current,
+        });
+    } else {
+        workspaces.current_layout_mut().close_leaf(new_id);
     }
 }
 
@@ -534,14 +740,12 @@ fn close_focused(
         }
         if terminals.remove(&focused_id).is_some() {
             workspaces.current_layout_mut().close_leaf(focused_id);
-            log::info!("closed tile {:?}", focused_id);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
-    backend: &Backend,
     canvas: &Canvas,
     font: &Font,
     theme: &Theme,
@@ -551,6 +755,7 @@ fn render_frame(
     popups: &[Popup],
     launcher: &launcher::Launcher,
     cfg: &Config,
+    mouse: Option<&input::Mouse>,
 ) {
     canvas.fill(theme.bg);
     let layout = workspaces.current_layout();
@@ -563,12 +768,11 @@ fn render_frame(
         let bg = if focused { theme.tile_bg_active } else { theme.tile_bg_inactive };
         canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, bg);
 
-        // ASCII рамка в MCD стиле: уголки + палочки.
-        draw_ascii_border(canvas, rect, theme, focused, *kind);
-
         let border_color = border_color_for(*kind, focused, theme);
         if focused {
             canvas.neon_border(rect.x, rect.y, rect.w, rect.h, border_color);
+        } else {
+            canvas.rect_outline(rect.x, rect.y, rect.w, rect.h, layout.border as u32, border_color);
         }
 
         match kind {
@@ -590,7 +794,7 @@ fn render_frame(
                             render_x11_window(canvas, backing, ww, hh, rect);
                         } else {
                             text.draw_text(rect.x + 4, rect.y + 4,
-                                &format!("X11 win 0x{:x} (no backing)", xwid.0),
+                                &format!("X11 0x{:x} (no backing)", xwid.0),
                                 theme.fg_dim, None);
                         }
                     } else {
@@ -605,53 +809,30 @@ fn render_frame(
         }
 
         let title = match kind {
-            TileKind::Terminal => terminals.get(leaf_id)
-                .map(|t| t.title.clone())
-                .unwrap_or_else(|| "term".to_string()),
-            TileKind::X11 => "x11".to_string(),
+            TileKind::Terminal => terminals.get(leaf_id).map(|t| t.title.clone()).unwrap_or_else(|| "term".into()),
+            TileKind::X11 => "x11".into(),
         };
         text.draw_text(rect.x + 8, rect.y + 2, &title,
             if focused { theme.accent_magenta } else { theme.fg_dim },
             Some(if focused { theme.tile_bg_active } else { theme.tile_bg_inactive }));
     }
 
-    // Launcher popup.
+    // Launcher.
     launcher.render(canvas, font, theme, canvas.width, canvas.height);
 
     // Popups.
     for p in popups {
         p.render(canvas, theme);
+        p.render_content(canvas, font, theme);
     }
 
     // Status bar.
     render_status_bar(canvas, font, theme, workspaces, cfg);
 
-    // Blit canvas → backend.
-    let canvas_data = canvas.data.lock();
-    let (backend_buf_ptr_mut, backend_len, backend_stride, backend_h) = match backend {
-        Backend::Drm(d) => (d.back.mmap_addr as *mut u8, d.back.size as usize, d.back.stride as usize, d.height as usize),
-        Backend::Fbdev(f) => (f.mmap_addr as *mut u8, f.size, f.stride as usize, f.height as usize),
-    };
-    let canvas_stride = canvas.stride as usize;
-    let min_stride = canvas_stride.min(backend_stride);
-    let rows = canvas.height as usize;
-    for r in 0..rows {
-        if r >= backend_h { break; }
-        let src_off = r * canvas_stride;
-        let dst_off = r * backend_stride;
-        let n = min_stride.min(canvas_data.len() - src_off).min(backend_len - dst_off);
-        unsafe {
-            std::ptr::copy_nonoverlapping(canvas_data.as_ptr().add(src_off),
-                                          backend_buf_ptr_mut.add(dst_off), n);
-        }
+    // Mouse cursor.
+    if let Some(m) = mouse {
+        m.render_cursor(canvas, theme);
     }
-}
-
-/// ASCII-рамка в стиле MCD: уголки `╔╗╚╝` + боковые `║` `═`.
-fn draw_ascii_border(canvas: &Canvas, rect: &Rect, theme: &Theme, focused: bool, kind: TileKind) {
-    let _ = (canvas, rect, theme, focused, kind);
-    // Рамку рисуем только как индикатор фокуса — пока рисуем через neon_border.
-    // TODO: добавить ASCII уголки через шрифт в углах плиток.
 }
 
 fn render_terminal(
@@ -699,13 +880,7 @@ fn render_terminal(
     }
 }
 
-fn render_x11_window(
-    canvas: &Canvas,
-    backing: &[u32],
-    src_w: u16,
-    src_h: u16,
-    rect: &Rect,
-) {
+fn render_x11_window(canvas: &Canvas, backing: &[u32], src_w: u16, src_h: u16, rect: &Rect) {
     if src_w == 0 || src_h == 0 { return; }
     let dst_w = rect.w as usize;
     let dst_h = rect.h as usize;
@@ -730,11 +905,10 @@ fn render_status_bar(canvas: &Canvas, font: &Font, theme: &Theme, workspaces: &W
     let text_renderer = TextRenderer::new(canvas, font);
     let mut x = 4;
 
-    // Workspace indicators.
     for n in 1..=workspaces.max {
         let name = workspaces.names.get(&n).cloned().unwrap_or_else(|| n.to_string());
         let is_current = workspaces.current == n;
-        let label = format!(" {}:{} ", n, name);
+        let label = format!(" {}:{}", n % 10, name);
         let color = if is_current { theme.accent_magenta } else { theme.fg_dim };
         if is_current {
             canvas.fill_rect(x, y + 2, (label.len() as u32) * font.width, font.height as u32,
@@ -744,8 +918,7 @@ fn render_status_bar(canvas: &Canvas, font: &Font, theme: &Theme, workspaces: &W
         x += (label.len() as i32 + 1) * font.width as i32;
     }
 
-    // Hint.
-    let hint = format!("| tiles:{} | Mod4+D launcher | Mod4+1..9 ws | Mod4+Enter term | Mod4+R resize",
+    let hint = format!("| tiles:{} | Mod4+D launcher | Mod4+1..0 ws | Mod4+Enter term | Mod4+R resize",
         workspaces.current_layout().all_leaf_ids().len());
     text_renderer.draw_text(x + 12, y + 4, &hint, theme.fg_default, None);
 }
@@ -800,4 +973,37 @@ fn set_nonblocking(fd: RawFd) {
         let flags = libc::fcntl(fd, libc::F_GETFL, 0);
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
+}
+
+/// Blit canvas → backend back buffer (multi-monitor или single).
+fn blit_to_backend(canvas: &Canvas, multi: &Option<MultiMonitorBackend>, single: Option<&mut Backend>) {
+    let canvas_data = canvas.data.lock();
+    if let Some(mb) = multi {
+        let (ptr, len, stride, _w, _h) = mb.active_back_buffer();
+        let canvas_stride = canvas.stride as usize;
+        let min_stride = canvas_stride.min(stride as usize);
+        let rows = canvas.height as usize;
+        for r in 0..rows {
+            let src_off = r * canvas_stride;
+            let dst_off = r * stride as usize;
+            let n = min_stride.min(canvas_data.len() - src_off).min(len - dst_off);
+            unsafe {
+                std::ptr::copy_nonoverlapping(canvas_data.as_ptr().add(src_off),
+                                              ptr.add(dst_off), n);
+            }
+        }
+    } else if let Some(sb) = single {
+        let buf = sb.back_buffer();
+        let n = buf.len().min(canvas_data.len());
+        buf[..n].copy_from_slice(&canvas_data[..n]);
+    }
+}
+
+fn flip_backend(multi: &Option<MultiMonitorBackend>, single: Option<&mut Backend>) -> Result<()> {
+    if let Some(_mb) = multi {
+        // Multi-monitor flip требует &mut — обрабатывается в run_wm.
+    } else if let Some(sb) = single {
+        sb.flip()?;
+    }
+    Ok(())
 }

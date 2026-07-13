@@ -1,0 +1,58 @@
+# Maintainer: SuperHot TTY contributors
+pkgname=superhot-tty
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="SuperHot MCD-styled TTY window manager with X11 tile embedding, multi-monitor, login screen"
+arch=('x86_64' 'aarch64')
+url="https://github.com/TumRedSun/SH-tty"
+license=('MIT')
+depends=(
+    'systemd'
+    'kbd'
+    'zsh'
+    'xorg-server-xephyr'
+    'pipewire'
+    'pipewire-pulse'
+    'wireplumber'
+    'xdg-desktop-portal'
+    'pam'
+)
+optdepends=(
+    'sdl2: gamepad button mapping (build with --features gamepad-sdl2)'
+    'xdg-desktop-portal-gtk: GTK file chooser portal'
+    'libvterm: full xterm compatibility (future)'
+)
+makedepends=('rust' 'cargo' 'gcc' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/TumRedSun/SH-tty/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+install=superhot-tty.install
+
+build() {
+    cd "$srcdir/SH-tty-$pkgver"
+    # Если установлен sdl2 — собираем с gamepad-sdl2.
+    if pkg-config --exists sdl2 2>/dev/null; then
+        cargo build --release --features gamepad-sdl2
+    else
+        cargo build --release
+    fi
+}
+
+package() {
+    cd "$srcdir/SH-tty-$pkgver"
+
+    # Binary.
+    install -Dm755 target/release/superhot-tty "$pkgdir/usr/local/bin/superhot-tty"
+
+    # Systemd unit.
+    install -Dm644 systemd/superhot-tty@.service "$pkgdir/etc/systemd/system/superhot-tty@.service"
+
+    # Default config.
+    install -Dm644 config/default.toml "$pkgdir/etc/SH-tty/config.toml"
+
+    # Example zshrc.
+    install -Dm644 skel/zshrc.example "$pkgdir/usr/share/SH-tty/skel/zshrc.example"
+
+    # README + LICENSE.
+    install -Dm644 README.md "$pkgdir/usr/share/doc/SH-tty/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/SH-tty/LICENSE"
+}

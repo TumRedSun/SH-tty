@@ -1,8 +1,10 @@
 pub mod kms;
 pub mod fbdev;
+pub mod multi_monitor;
 
 pub use kms::DrmBackend;
 pub use fbdev::FbdevBackend;
+pub use multi_monitor::{MultiMonitorBackend, Monitor};
 
 /// Унифицированный backend.
 pub enum Backend {

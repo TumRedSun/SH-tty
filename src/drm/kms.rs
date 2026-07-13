@@ -193,7 +193,8 @@ const DRM_MODE_PAGE_FLIP_TARGET: u32 = 0x04;
 const DRM_MODE_FLAG_INTERLACE: u32 = 0x02;
 
 // Connector status.
-const DRM_MODE_CONNECTED: u32 = 1;
+#[allow(dead_code)]
+const DRM_MODE_CONNECTED_LEGACY: u32 = 1;
 
 const DRM_FOURCC_XRGB8888: u32 = 0x34325258; // 'XR24' little-endian
 
@@ -288,7 +289,7 @@ impl DrmBackend {
             conn.modes_ptr = modes.as_mut_ptr() as u64;
             conn.encoders_ptr = encs.as_mut_ptr() as u64;
             let _ = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &mut conn)?;
-            if conn.connection != DRM_MODE_CONNECTED || n_modes == 0 {
+            if conn.connection != DRM_MODE_CONNECTED_LEGACY || n_modes == 0 {
                 continue;
             }
             // Choose first non-interlaced mode (preferably preferred).
@@ -410,7 +411,120 @@ fn ioctl<T>(fd: RawFd, req: u32, arg: &mut T) -> Result<()> {
     Ok(())
 }
 
-fn create_dumb_buffer(fd: RawFd, w: u32, h: u32) -> Result<DumbBuffer> {
+// Private helpers renamed to _inner to avoid conflicts with public versions below.
+
+// ===== Public helpers for multi-monitor =====
+
+/// Information about a connected DRM connector.
+pub struct ConnectorInfo {
+    pub connector_id: u32,
+    pub connector_name: String,
+    pub connection: u32,
+    pub encoder_id: Option<u32>,
+    pub modes: Vec<drm_mode_modeinfo>,
+}
+
+pub const DRM_MODE_CONNECTED: u32 = 1;
+
+/// Открывает /dev/dri/card0 (или card1 как fallback).
+pub fn open_drm_card() -> Result<RawFd> {
+    for path in &["/dev/dri/card0", "/dev/dri/card1"] {
+        let fd = unsafe {
+            libc::open(
+                std::ffi::CString::new(*path).unwrap().as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 { return Ok(fd); }
+    }
+    anyhow::bail!("no DRM device available");
+}
+
+pub fn set_drm_master(fd: RawFd) -> Result<()> {
+    let ret = unsafe { libc::ioctl(fd, DRM_IOCTL_SET_MASTER as _, 0 as *mut libc::c_void) };
+    if ret < 0 {
+        log::warn!("DRM_IOCTL_SET_MASTER failed: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn drop_drm_master(fd: RawFd) {
+    unsafe { libc::ioctl(fd, DRM_IOCTL_DROP_MASTER as _, 0 as *mut libc::c_void); }
+}
+
+/// Перечисляет все коннекторы на DRM card.
+pub fn enumerate_connectors(fd: RawFd) -> Result<Vec<ConnectorInfo>> {
+    let mut res = drm_mode_card_res::default();
+    ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res)?;
+    let n = res.count_connectors as usize;
+    let mut connector_ids = vec![0u32; n];
+    res.connector_id_ptr = connector_ids.as_mut_ptr() as u64;
+    ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res)?;
+
+    let mut out = Vec::new();
+    for cid in &connector_ids {
+        let mut conn = drm_mode_get_connector::default();
+        conn.connector_id = *cid;
+        let _ = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &mut conn);
+        let nmodes = conn.count_modes as usize;
+        let mut modes = vec![drm_mode_modeinfo::default(); nmodes];
+        conn.modes_ptr = modes.as_mut_ptr() as u64;
+        let _ = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &mut conn);
+
+        let connector_name = format!("{}-{}", connector_type_name(conn.connector_type), conn.connector_type_id);
+        out.push(ConnectorInfo {
+            connector_id: *cid,
+            connector_name,
+            connection: conn.connection,
+            encoder_id: if conn.encoder_id != 0 { Some(conn.encoder_id) } else { None },
+            modes,
+        });
+    }
+    Ok(out)
+}
+
+fn connector_type_name(t: u32) -> &'static str {
+    match t {
+        0 => "Unknown",
+        1 => "VGA",
+        2 => "DVII",
+        3 => "DVID",
+        4 => "DVIA",
+        5 => "Composite",
+        6 => "SVIDEO",
+        7 => "LVDS",
+        8 => "Component",
+        9 => "9PinDIN",
+        10 => "DisplayPort",
+        11 => "HDMIA",
+        12 => "HDMIB",
+        13 => "TV",
+        14 => "eDP",
+        15 => "Virtual",
+        16 => "DSI",
+        17 => "DPI",
+        _ => "Unknown",
+    }
+}
+
+pub fn get_encoder_crtc(fd: RawFd, encoder_id: u32) -> Option<u32> {
+    let mut enc = drm_mode_get_encoder::default();
+    enc.encoder_id = encoder_id;
+    if ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &mut enc).is_err() { return None; }
+    if enc.crtc_id != 0 { Some(enc.crtc_id) } else { None }
+}
+
+pub fn get_first_crtc(fd: RawFd) -> Option<u32> {
+    let mut res = drm_mode_card_res::default();
+    if ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res).is_err() { return None; }
+    let n = res.count_crtcs as usize;
+    let mut crtc_ids = vec![0u32; n];
+    res.crtc_id_ptr = crtc_ids.as_mut_ptr() as u64;
+    if ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res).is_err() { return None; }
+    crtc_ids.first().copied()
+}
+
+pub fn create_dumb_buffer(fd: RawFd, w: u32, h: u32) -> Result<DumbBuffer> {
     let mut create = drm_mode_create_dumb::default();
     create.width = w;
     create.height = h;
@@ -439,7 +553,6 @@ fn create_dumb_buffer(fd: RawFd, w: u32, h: u32) -> Result<DumbBuffer> {
     if addr == libc::MAP_FAILED {
         anyhow::bail!("mmap dumb buffer failed: {}", std::io::Error::last_os_error());
     }
-    // Zero-fill.
     unsafe { libc::memset(addr, 0, create.size as usize); }
     Ok(DumbBuffer {
         handle: create.handle,
@@ -451,7 +564,44 @@ fn create_dumb_buffer(fd: RawFd, w: u32, h: u32) -> Result<DumbBuffer> {
     })
 }
 
-fn create_fb2(fd: RawFd, w: u32, h: u32, handle: u32, stride: u32) -> Result<u32> {
+pub fn create_fb2(fd: RawFd, w: u32, h: u32, handle: u32, stride: u32) -> Result<u32> {
+    create_fb2_inner(fd, w, h, handle, stride)
+}
+
+pub fn set_crtc(fd: RawFd, crtc_id: u32, fb_id: u32, connector_id: u32, mode: &drm_mode_modeinfo) -> Result<()> {
+    let mut crtc = drm_mode_crtc::default();
+    crtc.crtc_id = crtc_id;
+    crtc.set_connectors_ptr = &connector_id as *const u32 as u64;
+    crtc.count_connectors = 1;
+    crtc.fb_id = fb_id;
+    crtc.x = 0;
+    crtc.y = 0;
+    crtc.mode_valid = 1;
+    crtc.mode = *mode;
+    let ret = unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_SETCRTC as _, &crtc as *const _ as *const _) };
+    if ret < 0 {
+        anyhow::bail!("SETCRTC failed: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn page_flip(fd: RawFd, crtc_id: u32, fb_id: u32) -> Result<()> {
+    let mut pf = drm_mode_crtc_page_flip::default();
+    pf.crtc_id = crtc_id;
+    pf.fb_id = fb_id;
+    pf.flags = 0;
+    pf.user_data = 0;
+    let ret = unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP as _, &pf as *const _ as *const _) };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EBUSY) { return Ok(()); }
+        log::warn!("page_flip on crtc {}: {}", crtc_id, err);
+    }
+    Ok(())
+}
+
+// rename internal function to avoid conflict
+fn create_fb2_inner(fd: RawFd, w: u32, h: u32, handle: u32, stride: u32) -> Result<u32> {
     let mut fb = drm_mode_fb_cmd2::default();
     fb.width = w;
     fb.height = h;
@@ -464,7 +614,3 @@ fn create_fb2(fd: RawFd, w: u32, h: u32, handle: u32, stride: u32) -> Result<u32
     }
     Ok(fb.fb_id)
 }
-
-// Подавляем неиспользуемые импорты.
-#[allow(dead_code)]
-fn _unused_path_check(p: &Path) -> bool { p.exists() }

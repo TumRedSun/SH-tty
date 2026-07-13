@@ -1,0 +1,26 @@
+#!/bin/sh
+# postinst — после установки .deb пакета.
+set -e
+
+case "$1" in
+    configure)
+        echo ""
+        echo "==> SuperHot TTY installed!"
+        echo ""
+        echo "To enable:"
+        echo "  sudo systemctl disable getty@tty1"
+        echo "  sudo systemctl enable superhot-tty@tty1"
+        echo "  sudo reboot"
+        echo ""
+        echo "Config: /etc/SH-tty/config.toml"
+        echo "User config: ~/.config/SH-tty/config.toml"
+        echo ""
+        echo "Rollback to agetty:"
+        echo "  sudo systemctl disable superhot-tty@tty1"
+        echo "  sudo systemctl enable getty@tty1"
+        echo ""
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

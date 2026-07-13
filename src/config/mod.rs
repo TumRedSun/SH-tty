@@ -1,17 +1,18 @@
-//! Полноценный конфиг тайлового WM в TOML формате.
+//! Полноценный конфиг тайлового WM в TOML формате (v0.3).
 //!
-//! Поддерживает:
-//!   - модификаторы + клавиши → действия
-//!   - workspaces 1-9
-//!   - перемещение окон по сетке и между workspaces
-//!   - настройки темы (MCD палитра)
-//!   - настройки launcher
-//!   - маппинг геймпада
-//!   - настройки звука/портала
+//! Пути поиска конфига (в порядке приоритета):
+//!   1. $XDG_CONFIG_HOME/SH-tty/config.toml  (обычно ~/.config/SH-tty/config.toml)
+//!   2. ~/.config/SH-tty/config.toml
+//!   3. /etc/SH-tty/config.toml              (system-wide default)
+//!
+//! Никаких захардкоженных биндингов — все в `[[keybindings]]`.
+//! Никаких захардкоженных настроек — все имеют defaults.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+pub mod window_rules;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -20,11 +21,21 @@ pub struct Config {
     #[serde(default)]
     pub theme: ThemeCfg,
     #[serde(default)]
+    pub login: LoginCfg,
+    #[serde(default)]
     pub keybindings: Vec<Binding>,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceCfg>,
     #[serde(default)]
+    pub monitors: Vec<MonitorCfg>,
+    #[serde(default)]
+    pub window_rules: Vec<WindowRule>,
+    #[serde(default)]
+    pub autostart: Vec<AutostartEntry>,
+    #[serde(default)]
     pub launcher: LauncherCfg,
+    #[serde(default)]
+    pub popups: PopupsCfg,
     #[serde(default)]
     pub audio: AudioCfg,
     #[serde(default)]
@@ -45,8 +56,10 @@ pub struct General {
     pub outer_padding: i32,
     pub status_bar_height: u32,
     pub framerate: u32,
-    /// Случайные глитч-эффекты для MCD-стиля (мигание рамок, RGB-сдвиг).
-    pub glitch_intensity: f32, // 0.0..1.0
+    /// Случайные глитч-эффекты для MCD-стиля (0.0..1.0).
+    pub glitch_intensity: f32,
+    /// Количество workspaces (по умолчанию 10 — 1..9 + 0=10).
+    pub workspace_count: u8,
 }
 
 impl Default for General {
@@ -61,6 +74,7 @@ impl Default for General {
             status_bar_height: 24,
             framerate: 60,
             glitch_intensity: 0.15,
+            workspace_count: 10,
         }
     }
 }
@@ -102,10 +116,68 @@ impl Default for ThemeCfg {
     }
 }
 
-/// Описание клавишного биндинга.
-/// `key` — клавиша (буква/цифра/F1/Return/Space/Tab/Left/Right/...).
-/// `mods` — список модификаторов: Super, Ctrl, Alt, Shift.
-/// `action` — команда для WM (см. Action).
+/// Конфигурация login screen.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoginCfg {
+    /// Текст по центру экрана (как в SHMCD). Например "MORE", "БОЛЬШЕ" или свой текст.
+    pub title: String,
+    /// Подзаголовок под главным текстом.
+    pub subtitle: String,
+    /// Язык — определяет дефолтные строки если title/subtitle не заданы.
+    /// "ru" → "БОЛЬШЕ" / "СУПЕРХОТ", "en" → "MORE" / "SUPERHOT".
+    pub language: String,
+    /// Шрифт для большого заголовка (если отличается от general.font).
+    pub title_font: Option<String>,
+    /// Показывать ли clock.
+    pub show_clock: bool,
+    /// Цвет текста login (по умолчанию = theme.accent_magenta).
+    pub title_color: Option<String>,
+    /// Показывать ли подсказку "Press Enter to login".
+    pub show_hint: bool,
+    /// PAM service (обычно "login").
+    pub pam_service: String,
+    /// Запускать ли WM сразу после login без выбора сессии.
+    pub auto_start_session: bool,
+}
+
+impl Default for LoginCfg {
+    fn default() -> Self {
+        LoginCfg {
+            title: String::new(),     // empty → use language default
+            subtitle: String::new(),
+            language: "en".into(),
+            title_font: None,
+            show_clock: true,
+            title_color: None,
+            show_hint: true,
+            pam_service: "login".into(),
+            auto_start_session: true,
+        }
+    }
+}
+
+impl LoginCfg {
+    /// Возвращает эффективный заголовок (из конфига или по языку).
+    pub fn effective_title(&self) -> String {
+        if !self.title.is_empty() {
+            self.title.clone()
+        } else if self.language == "ru" {
+            "БОЛЬШЕ".into()
+        } else {
+            "MORE".into()
+        }
+    }
+    pub fn effective_subtitle(&self) -> String {
+        if !self.subtitle.is_empty() {
+            self.subtitle.clone()
+        } else if self.language == "ru" {
+            "СУПЕРХОТ TTY".into()
+        } else {
+            "SUPERHOT TTY".into()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Binding {
     pub key: String,
@@ -116,47 +188,32 @@ pub struct Binding {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
-    /// Запустить команду в новом терминальном тайле.
     Spawn { cmd: String, args: Vec<String> },
-    /// Открыть X11 приложение в новой плитке (через launcher).
     SpawnX11 { cmd: String, args: Vec<String> },
-    /// Открыть launcher (rofi-подобный).
+    SpawnTerminal { cmd: Option<String>, args: Vec<String> },
     Launcher,
-    /// Split активного тайла горизонтально.
     SplitHorizontal,
-    /// Split активного тайла вертикально.
     SplitVertical,
-    /// Фокус в направлении.
     Focus { dir: Direction },
-    /// Переместить активное окно в направлении.
     Move { dir: Direction },
-    /// Переключиться на workspace N (1..9).
     Workspace { n: u8 },
-    /// Переместить активный тайл на workspace N.
     MoveToWorkspace { n: u8 },
-    /// Закрыть активный тайл.
     Close,
-    /// Fullscreen toggle.
     Fullscreen,
-    /// Resize mode toggle.
     ResizeMode,
-    /// Cycle focus.
     CycleFocus,
-    /// Resize активного split'а в направлении.
     Resize { dir: Direction, delta: f32 },
-    /// Выход.
     Quit,
-    /// Запустить терминал с shell.
     Terminal,
-    /// Вперёд/назад в tab-стеке (если tile часть стека).
     TabNext,
     TabPrev,
-    /// Свап активного окна с соседом в направлении.
     Swap { dir: Direction },
-    /// Переключить layout активного контейнера (tile/stack/tabbed).
     ToggleLayout,
-    /// Перезагрузить конфиг.
     Reload,
+    /// Запустить скрипт и показать его вывод в popup.
+    PopupScript { cmd: String, args: Vec<String> },
+    /// Показать статичный popup с текстом.
+    Popup { text: String },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Copy)]
@@ -172,29 +229,111 @@ pub enum Direction {
 pub struct WorkspaceCfg {
     pub n: u8,
     pub name: String,
-    /// Команда запускаемая при первом входе на workspace.
     #[serde(default)]
     pub on_init: Option<String>,
 }
 
+/// Конфигурация монитора: имя коннектора → workspace bindings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MonitorCfg {
+    /// Имя коннектора DRM, например "HDMI-A-1", "DP-1", "eDP-1".
+    pub connector: String,
+    /// Список workspace IDs (1..N), которые привязаны к этому монитору.
+    /// Пример: [2, 4, 6, 8, 10] — чётные на этом мониторе.
+    pub workspaces: Vec<u8>,
+    /// Разрешение (пусто = preferred из EDID).
+    #[serde(default)]
+    pub resolution: Option<(u32, u32)>,
+    /// Частота обновления (пусто = default).
+    #[serde(default)]
+    pub refresh_rate: Option<u32>,
+    /// Позиция относительно других мониторов: "left-of X", "right-of X", "above X", "below X", "primary".
+    #[serde(default)]
+    pub position: Option<String>,
+    /// Включить монитор (false = отключить).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool { true }
+
+/// Правило для автоматического размещения окон.
+/// Применяется при создании нового X11 окна (через launcher или автоматически).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WindowRule {
+    /// Критерий匹配ения. Все непустые поля должны совпасть (AND).
+    /// Любое из: window class (WM_CLASS), window title (WM_NAME), app_id (from .desktop).
+    #[serde(default)]
+    pub match_class: Option<String>,
+    #[serde(default)]
+    pub match_title: Option<String>,
+    #[serde(default)]
+    pub match_app_id: Option<String>,
+    /// Regex-матчинг (если true — поле трактуется как regex).
+    #[serde(default)]
+    pub regex: bool,
+    /// На какой workspace поместить окно (1..N). Если пусто — текущий активный.
+    #[serde(default)]
+    pub workspace: Option<u8>,
+    /// На какой монитор (по имени коннектора). Если пусто — монитор текущего ws.
+    #[serde(default)]
+    pub monitor: Option<String>,
+    /// Размер плитки в процентах от экрана (width%, height%). Если пусто — auto.
+    #[serde(default)]
+    pub size: Option<(u32, u32)>,
+    /// Позиция плитки в процентах (x%, y%). Если пусто — auto place.
+    #[serde(default)]
+    pub position: Option<(u32, u32)>,
+    /// Сделать окно сфокусированным при появлении.
+    #[serde(default = "default_true")]
+    pub focus: bool,
+    /// Fullscreen при появлении.
+    #[serde(default)]
+    pub fullscreen: bool,
+    /// Не размещать автоматически (для .desktop-only правил, например).
+    #[serde(default)]
+    pub skip_auto_place: bool,
+}
+
+/// Запись автозапуска. Запускается при старте WM.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutostartEntry {
+    /// Тип команды: "x11" (графическая), "terminal" (в нашем терминале),
+    /// "command" (фоновый процесс, без UI).
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Задержка перед запуском (мс).
+    #[serde(default)]
+    pub delay_ms: u64,
+    /// Workspace на котором запустить (если применимо).
+    #[serde(default)]
+    pub workspace: Option<u8>,
+    /// Монитор для запуска (если применимо).
+    #[serde(default)]
+    pub monitor: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LauncherCfg {
-    /// Список директорий с .desktop файлами.
     #[serde(default)]
     pub desktop_paths: Vec<String>,
-    /// Шрифт launcher popup.
     #[serde(default = "default_launcher_rows")]
     pub max_rows: u32,
-    /// Дополнительные команды (имя → cmd).
     #[serde(default)]
     pub custom_entries: HashMap<String, String>,
-    /// Запускать X11 приложения на этом дисплее.
     #[serde(default = "default_x11_display")]
     pub x11_display: String,
+    /// Shell для запуска терминальных приложений (Terminal=true в .desktop).
+    #[serde(default = "default_shell")]
+    pub terminal_shell: String,
 }
 
 fn default_launcher_rows() -> u32 { 12 }
 fn default_x11_display() -> String { ":1".into() }
+fn default_shell() -> String { "zsh".into() }
 
 impl Default for LauncherCfg {
     fn default() -> Self {
@@ -207,24 +346,52 @@ impl Default for LauncherCfg {
             max_rows: 12,
             custom_entries: HashMap::new(),
             x11_display: ":1".into(),
+            terminal_shell: "zsh".into(),
+        }
+    }
+}
+
+/// Конфигурация popups (центральный MCD-styled popup).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PopupsCfg {
+    /// Длительность показа popup (в кадрах, при framerate=60 → 240 = 4 сек).
+    #[serde(default = "default_popup_duration")]
+    pub duration_frames: u32,
+    /// Максимальная ширина popup в процентах от экрана.
+    #[serde(default = "default_popup_max_w")]
+    pub max_width_pct: u32,
+    /// Показывать glitch border (RGB-сдвиг).
+    #[serde(default = "default_true")]
+    pub glitch_border: bool,
+    /// Шрифт для popup (если отличается).
+    #[serde(default)]
+    pub font: Option<String>,
+}
+
+fn default_popup_duration() -> u32 { 240 }
+fn default_popup_max_w() -> u32 { 67 }
+
+impl Default for PopupsCfg {
+    fn default() -> Self {
+        PopupsCfg {
+            duration_frames: 240,
+            max_width_pct: 67,
+            glitch_border: true,
+            font: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AudioCfg {
-    /// Запустить pipewire-pulse для совместимости с PulseAudio приложениями.
     #[serde(default = "default_true")]
     pub start_pipewire_pulse: bool,
-    /// Запустить wireplumber (session manager).
     #[serde(default = "default_true")]
     pub start_wireplumber: bool,
-    /// Громкость по умолчанию (0..100).
     #[serde(default = "default_volume")]
     pub default_volume: u32,
 }
 
-fn default_true() -> bool { true }
 fn default_volume() -> u32 { 70 }
 
 impl Default for AudioCfg {
@@ -239,13 +406,10 @@ impl Default for AudioCfg {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PortalCfg {
-    /// Запустить xdg-desktop-portal backend.
     #[serde(default = "default_true")]
     pub start_portal: bool,
-    /// DBus service name нашего портала.
     #[serde(default = "default_portal_name")]
     pub service_name: String,
-    /// Путь для записи object path.
     #[serde(default = "default_portal_path")]
     pub object_path: String,
 }
@@ -265,16 +429,12 @@ impl Default for PortalCfg {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GamepadCfg {
-    /// Включить поддержку геймпадов через SDL2.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Передавать события геймпада напрямую в Steam (через evdev).
     #[serde(default = "default_true")]
     pub steam_passthrough: bool,
-    /// Маппинг кнопок → клавиши (для использования вне Steam).
     #[serde(default)]
     pub keymap: HashMap<String, String>,
-    /// Чувствительность стиков (1..100).
     #[serde(default = "default_stick_sens")]
     pub stick_sensitivity: u32,
 }
@@ -305,21 +465,20 @@ impl Default for GamepadCfg {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct X11Cfg {
-    /// Использовать DRI3 + DMA-BUF для GPU-ускорения.
     #[serde(default = "default_true")]
     pub dri3: bool,
-    /// Xephyr display.
     #[serde(default = "default_x11_display")]
     pub display: String,
-    /// Xephyr screen size.
     #[serde(default = "default_x11_size")]
     pub screen_size: (u16, u16),
-    /// XTest extension для ввода в X11 окна.
     #[serde(default = "default_true")]
     pub xtest_input: bool,
-    /// Hardware cursor через DRM cursor plane.
     #[serde(default = "default_true")]
     pub hardware_cursor: bool,
+    /// Автоматически размещать новые X11 окна на активном workspace.
+    /// Если false — окно ждёт пока пользователь не привяжет его вручную.
+    #[serde(default = "default_true")]
+    pub auto_place_windows: bool,
 }
 
 fn default_x11_size() -> (u16, u16) { (1920, 1080) }
@@ -332,21 +491,19 @@ impl Default for X11Cfg {
             screen_size: (1920, 1080),
             xtest_input: true,
             hardware_cursor: true,
+            auto_place_windows: true,
         }
     }
 }
 
 impl Config {
-    /// Загружает конфиг из стандартных местоположений.
+    /// Загружает конфиг из стандартных местоположений (XDG priority).
     pub fn load() -> Self {
-        let candidates = [
-            "/etc/superhot-tty/config.toml",
-            "~/.config/superhot-tty/config.toml",
-        ];
-        for path in candidates {
-            let p = shellexpand::tilde(path).to_string();
+        let candidates = config_paths();
+        for path in &candidates {
+            let p = expand_tilde(path);
             if let Ok(s) = std::fs::read_to_string(&p) {
-                match toml::from_str(&s) {
+                match toml::from_str::<Config>(&s) {
                     Ok(c) => {
                         log::info!("loaded config from {}", p);
                         return c;
@@ -364,44 +521,47 @@ impl Config {
     }
 }
 
+/// Пути поиска конфига в порядке приоритета.
+pub fn config_paths() -> Vec<String> {
+    let mut v = Vec::new();
+    // XDG_CONFIG_HOME (обычно ~/.config).
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        v.push(format!("{}/SH-tty/config.toml", xdg));
+    }
+    // ~/.config/SH-tty/config.toml
+    if let Ok(home) = std::env::var("HOME") {
+        v.push(format!("{}/.config/SH-tty/config.toml", home));
+    }
+    // /etc/SH-tty/config.toml (system-wide).
+    v.push("/etc/SH-tty/config.toml".into());
+    v
+}
+
 impl Default for Config {
     fn default() -> Self {
         toml::from_str(Self::default_config_toml())
-            .unwrap_or_else(|e| { log::error!("default config parse: {}", e); Config {
-                general: General::default(),
-                theme: ThemeCfg::default(),
-                keybindings: default_bindings(),
-                workspaces: default_workspaces(),
-                launcher: LauncherCfg::default(),
-                audio: AudioCfg::default(),
-                portal: PortalCfg::default(),
-                gamepad: GamepadCfg::default(),
-                x11: X11Cfg::default(),
-            }})
+            .unwrap_or_else(|e| {
+                log::error!("default config parse: {}", e);
+                Config {
+                    general: General::default(),
+                    theme: ThemeCfg::default(),
+                    login: LoginCfg::default(),
+                    keybindings: Vec::new(),
+                    workspaces: Vec::new(),
+                    monitors: Vec::new(),
+                    window_rules: Vec::new(),
+                    autostart: Vec::new(),
+                    launcher: LauncherCfg::default(),
+                    popups: PopupsCfg::default(),
+                    audio: AudioCfg::default(),
+                    portal: PortalCfg::default(),
+                    gamepad: GamepadCfg::default(),
+                    x11: X11Cfg::default(),
+                }
+            })
     }
 }
 
-fn default_bindings() -> Vec<Binding> {
-    vec![]
-}
-
-fn default_workspaces() -> Vec<WorkspaceCfg> {
-    vec![]
-}
-
-// minimal shellexpand replacement
-mod shellexpand {
-    pub fn tilde(s: &str) -> std::borrow::Cow<'_, str> {
-        if let Some(rest) = s.strip_prefix("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return std::borrow::Cow::Owned(format!("{}/{}", home, rest));
-            }
-        }
-        std::borrow::Cow::Borrowed(s)
-    }
-}
-
-/// Парсит строку вида "Super+D" → (mods, key).
 pub fn parse_keycombo(s: &str) -> (Vec<String>, String) {
     let parts: Vec<&str> = s.split('+').collect();
     if parts.is_empty() { return (vec![], s.to_string()); }
@@ -410,7 +570,6 @@ pub fn parse_keycombo(s: &str) -> (Vec<String>, String) {
     (mods, key)
 }
 
-/// Конвертирует hex "#RRGGBB" в (r,g,b).
 pub fn parse_color(s: &str) -> (u8, u8, u8) {
     let s = s.trim_start_matches('#');
     if s.len() != 6 { return (0, 0, 0); }
@@ -418,6 +577,15 @@ pub fn parse_color(s: &str) -> (u8, u8, u8) {
     let g = u8::from_str_radix(&s[2..4], 16).unwrap_or(0);
     let b = u8::from_str_radix(&s[4..6], 16).unwrap_or(0);
     (r, g, b)
+}
+
+pub fn expand_tilde(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}/{}", home, rest);
+        }
+    }
+    s.to_string()
 }
 
 #[allow(dead_code)]

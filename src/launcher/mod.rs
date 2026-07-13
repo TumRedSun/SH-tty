@@ -225,14 +225,30 @@ impl Launcher {
         text.draw_text(cx, fy, &count, theme.accent_cyan, None);
     }
 
-    /// Запускает выбранную программу на нашем X11-дисплее.
-    pub fn launch(entry: &Entry, display: &str) -> std::io::Result<()> {
-        let mut cmd = Command::new(&entry.exec);
-        cmd.env("DISPLAY", display);
-        cmd.env("XDG_SESSION_TYPE", "x11");
-        cmd.env("XDG_CURRENT_DESKTOP", "superhot");
-        cmd.spawn()?;
-        log::info!("launched '{}'", entry.exec);
+    /// Запускает выбранную программу.
+    /// Если entry.is_terminal == true → запускаем Exec в нашем нативном терминале
+    /// (через shell -c "exec ...").
+    /// Иначе — запускаем как X11 приложение.
+    pub fn launch(entry: &Entry, display: &str, terminal_shell: &str) -> std::io::Result<()> {
+        if entry.is_terminal {
+            // Запускаем в нашем нативном терминале: shell -c "exec <cmd>"
+            let full_cmd = format!("exec {}", entry.exec);
+            let mut cmd = Command::new(terminal_shell);
+            cmd.args(["-c", &full_cmd]);
+            cmd.env("DISPLAY", display);
+            cmd.env("XDG_SESSION_TYPE", "x11");
+            cmd.env("XDG_CURRENT_DESKTOP", "superhot");
+            cmd.env("TERM", "xterm-256color");
+            cmd.spawn()?;
+            log::info!("launched (terminal) '{}' via {}", entry.exec, terminal_shell);
+        } else {
+            let mut cmd = Command::new(&entry.exec);
+            cmd.env("DISPLAY", display);
+            cmd.env("XDG_SESSION_TYPE", "x11");
+            cmd.env("XDG_CURRENT_DESKTOP", "superhot");
+            cmd.spawn()?;
+            log::info!("launched (x11) '{}'", entry.exec);
+        }
         Ok(())
     }
 }

@@ -1,12 +1,12 @@
 [Unit]
-Description=SuperHot TTY window manager v0.2 on %I
+Description=SuperHot TTY window manager v0.3 on %I
 Conflicts=rescue.service
 After=systemd-logind.service systemd-vconsole-setup.service
 Before=getty.target
-Wants=systemd-logind.service pipewire.service pipewire-pulse.service wireplumber.service
+Wants=systemd-logind.service
 After=systemd-user-sessions.service plymouth-quit.service
 
-# Disable default agetty.
+# Disable default agetty — superhot-tty имеет собственный login screen.
 Conflicts=getty@%i.service
 
 [Service]
@@ -21,6 +21,7 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
 
+# Запуск от root (нужен для DRM master, /dev/input/event*, PAM login).
 User=root
 WorkingDirectory=/root
 PAMName=login
@@ -34,9 +35,6 @@ Environment=XDG_CURRENT_DESKTOP=superhot
 Environment=LANG=en_US.UTF-8
 Environment=RUST_LOG=info
 Environment=SUPERHOT_TTY=1
-
-# PipeWire socket dir (если запускаем pipewire от root).
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
 KillMode=mixed
 KillSignal=SIGTERM
