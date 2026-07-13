@@ -1,0 +1,21 @@
+#!/bin/sh
+# prerm — перед удалением .deb пакета.
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        # Откатываем к стандартному getty.
+        if systemctl is-enabled superhot-tty@tty1 >/dev/null 2>&1; then
+            systemctl disable superhot-tty@tty1 || true
+        fi
+        if [ -f /etc/systemd/system/getty@tty1.service.d/override.conf ]; then
+            rm -f /etc/systemd/system/getty@tty1.service.d/override.conf
+            systemctl enable getty@tty1 2>/dev/null || true
+        fi
+        systemctl daemon-reload || true
+        echo "==> SuperHot TTY disabled, getty@tty1 restored"
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

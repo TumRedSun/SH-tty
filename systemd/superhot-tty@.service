@@ -1,0 +1,45 @@
+[Unit]
+Description=SuperHot TTY window manager v0.3 on %I
+Conflicts=rescue.service
+After=systemd-logind.service systemd-vconsole-setup.service
+Before=getty.target
+Wants=systemd-logind.service
+After=systemd-user-sessions.service plymouth-quit.service
+
+# Disable default agetty — superhot-tty имеет собственный login screen.
+Conflicts=getty@%i.service
+
+[Service]
+Type=idle
+ExecStart=/usr/local/bin/superhot-tty
+Restart=always
+RestartSec=2
+
+StandardInput=tty
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+# Запуск от root (нужен для DRM master, /dev/input/event*, PAM login).
+User=root
+WorkingDirectory=/root
+PAMName=login
+
+ProtectSystem=full
+ProtectHome=false
+Environment=DISPLAY=:1
+Environment=XDG_RUNTIME_DIR=/run
+Environment=XDG_SESSION_TYPE=desktop
+Environment=XDG_CURRENT_DESKTOP=superhot
+Environment=LANG=en_US.UTF-8
+Environment=RUST_LOG=info
+Environment=SUPERHOT_TTY=1
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target
+DefaultInstance=tty1

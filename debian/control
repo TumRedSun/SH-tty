@@ -1,0 +1,29 @@
+Package: superhot-tty
+Version: 0.3.0-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: systemd, kbd, zsh, xserver-xephyr, pipewire, pipewire-pulse, wireplumber, xdg-desktop-portal, libpam0g
+Recommends: xdg-desktop-portal-gtk
+Suggests: libsdl2-dev
+Maintainer: SuperHot TTY contributors
+Description: SuperHot MCD-styled TTY window manager
+ SuperHot TTY is a tile-based window manager for the Linux console,
+ styled after SuperHot: Mind Control Delete. It replaces agetty on tty1
+ and works directly with DRM/KMS (no X11/Wayland backend).
+ .
+ Features:
+   * Tile-based BSP/i3 layout
+   * 10 workspaces with multi-monitor binding
+   * Rofi-like launcher (Super+D)
+   * X11 window embedding via Xephyr + XComposite
+   * DRI3+DMA-BUF GPU acceleration infrastructure
+   * PipeWire audio stack
+   * xdg-desktop-portal ScreenCast backend
+   * Mouse + gamepad (evdev + optional SDL2)
+   * TOML configuration (~/.config/SH-tty/config.toml)
+   * PAM login screen with MCD theming
+   * Window rules for automatic placement
+   * Autostart commands
+Homepage: https://github.com/TumRedSun/SH-tty
+License: MIT

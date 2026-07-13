@@ -1,0 +1,79 @@
+# ~/.zshrc — пример темы для superhot-tty
+# MCD-стиль: ASCII рамки вокруг prompt, неоновые акценты.
+#
+# Пользователь может полностью заменить этот файл — superhot-tty только
+# запускает zsh, всё оформление prompt остаётся за пользователем.
+
+# === Цвета MCD палитры ===
+autoload -U colors && colors
+local MCD_BG=$'\e[48;5;234m'      # глубокий фиолетовый фон
+local MCD_MAGENTA=$'\e[38;5;197m' # неоновая магента
+local MCD_CYAN=$'\e[38;5;51m'     # неоновый циан
+local MCD_DIM=$'\e[38;5;60m'      # тусклый серо-фиолетовый
+local MCD_RESET=$'\e[0m'
+
+# === Prompt с ASCII уголками ===
+# ╭─ user@host ~
+# ╰─❯
+# Левая часть.
+PROMPT='%F{197}╭─%f %F{51}%n%f%F{60}@%f%F{51}%m%f %F{60}%~%f
+%F{197}╰─%f%F{197}❯%f %F{244}%#%f '
+
+# Правая часть — время + git branch.
+RPROMPT='%F{60}[%f%F{51}%T%f%F{60}]%f $(git_prompt_info)'
+
+# Git prompt (упрощённый).
+autoload -Uz vcs_info
+precmd_vcs() {
+    vcs_info
+}
+precmd_functions+=( precmd_vcs )
+zstyle ':vcs_info:git:*' formats '%F{60}(%f%F{197}%b%f%F{60})%f'
+zstyle ':vcs_info:git:*' actionformats '%F{60}(%f%F{197}%b%f%F{60}|%F{51}%a%f%F{60})%f'
+setopt PROMPT_SUBST
+RPROMPT='%F{60}[%f%F{51}%T%f%F{60}]%f ${vcs_info_msg_0_}'
+
+# === История ===
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt SHARE_HISTORY
+setopt HIST_IGNORE_DUPS
+setopt HIST_IGNORE_SPACE
+
+# === Aliases ===
+alias ls='ls --color=auto'
+alias ll='ls -lah --color=auto'
+alias grep='grep --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# === Completions ===
+autoload -Uz compinit && compinit
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+
+# === Key bindings ===
+bindkey -e  # emacs-style
+bindkey '^[[A' history-search-backward  # Up
+bindkey '^[[B' history-search-forward   # Down
+
+# === Title bar (если поддерживается) ===
+case $TERM in
+    xterm-256color|screen*)
+        precmd() { print -Pn "\e]0;%n@%m:%~\a" }
+        ;;
+esac
+
+# === superhot-tty welcome ===
+if [[ -n "$SUPERHOT_TTY" ]]; then
+    echo ""
+    echo "  ${MCD_MAGENTA}╔════════════════════════════════════════╗${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}║${MCD_CYAN}   SUPERHOT TTY  ${MCD_DIM}v0.2   ${MCD_MAGENTA}             ║${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}╠════════════════════════════════════════╣${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+D${MCD_RESET} launcher    ${MCD_DIM}Mod4+1..9${MCD_RESET} ws    ${MCD_MAGENTA}║${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+Enter${MCD_RESET} term    ${MCD_DIM}Mod4+E${MCD_RESET} X11 tile    ${MCD_MAGENTA}║${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+Shift+1..9${MCD_RESET} move to ws            ${MCD_MAGENTA}║${MCD_RESET}"
+    echo "  ${MCD_MAGENTA}╚════════════════════════════════════════╝${MCD_RESET}"
+    echo ""
+fi

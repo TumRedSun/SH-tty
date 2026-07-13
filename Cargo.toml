@@ -1,0 +1,85 @@
+[package]
+name = "superhot-tty"
+version = "0.5.0"
+edition = "2021"
+description = "SuperHot MCD-styled TTY window manager with DRI3, hardware cursor, overlay planes, login screen, multi-monitor, live-reload config, glitch animations, IPC socket, libvterm xterm compatibility"
+authors = ["superhot-tty contributors"]
+license = "MIT"
+
+[[bin]]
+name = "superhot-tty"
+path = "src/main.rs"
+
+[[bin]]
+name = "shtty-msg"
+path = "src/bin/shtty_msg.rs"
+
+[features]
+default = []
+# Включает SDL2 gamepad support. Требует libsdl2-dev.
+gamepad-sdl2 = ["dep:sdl2"]
+# Включает PAM аутентификацию (libpam). Без этой фичи login screen
+# использует упрощённую проверку через /etc/passwd + crypt.
+pam = []
+
+[dependencies]
+# DRM/KMS raw access
+drm = "0.11"
+drm-fourcc = "2.2"
+
+# Unix primitives
+nix = { version = "0.29", features = ["fs", "process", "signal", "term", "ioctl", "mman", "user"] }
+libc = "0.2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# X11 compositor client + XTest (no xinput — он не нужен нам)
+x11rb = { version = "0.13", features = ["composite", "damage", "shm", "xkb", "randr", "render", "xfixes"] }
+
+# Serialization for config
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Misc
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# Gamepad: SDL2 optional (для не-Steam сценария маппинга кнопок в клавиши).
+# Без этой фичи gamepad работает в режиме evdev passthrough (Steam Input нативно).
+sdl2 = { version = "0.37", default-features = false, optional = true }
+
+# D-Bus for xdg-desktop-portal (ScreenCast)
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+# Async runtime (for portal DBus)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "process"] }
+
+# PipeWire via libloading (no hard dep)
+libloading = "0.8"
+
+# Glob for .desktop file scanning
+glob = "0.3"
+
+# XDG dirs
+xdg = "2.5"
+
+# Shmem for DRI3
+memmap2 = "0.9"
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
