@@ -126,6 +126,13 @@ impl X11Compositor {
                     }
                 }
                 x11rb::protocol::Event::DestroyNotify(d) => {
+                    // Уничтожаем damage object для удаляемого окна, иначе
+                    // будет leak X server resources (damage handles не GC'ятся).
+                    if let Some(w) = self.windows.iter().find(|w| w.xid == d.window) {
+                        if w.damage != 0 {
+                            let _ = damage::destroy(&self.conn, w.damage);
+                        }
+                    }
                     self.windows.retain(|w| w.xid != d.window);
                     log::info!("X DestroyNotify: 0x{:x}", d.window);
                 }
@@ -141,12 +148,32 @@ impl X11Compositor {
     }
 
     fn register_window(&mut self, xid: u32, w: u16, h: u16) {
-        // Damage handle для упрощения не сохраняем (используем dirty flag + poll events).
-        let _ = damage::create(&self.conn, xid, 0, damage::ReportLevel::NON_EMPTY);
+        // Создаём damage object для отслеживания изменений окна.
+        // Правильный flow: generate_id() → damage::create(drawable, damage_id, level).
+        // Сохраняем damage_id чтобы уничтожить объект при DestroyNotify —
+        // иначе X server будет leak'ать damage handles.
+        let damage_handle = match self.conn.generate_id() {
+            Ok(damage_id) => {
+                match damage::create(&self.conn, xid, damage_id, damage::ReportLevel::NON_EMPTY) {
+                    Ok(_) => {
+                        let _ = self.conn.flush();
+                        damage_id
+                    }
+                    Err(e) => {
+                        log::warn!("damage::create failed for 0x{:x}: {}", xid, e);
+                        0
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("generate_id for damage failed: {}", e);
+                0
+            }
+        };
         let backing = vec![0; (w as usize) * (h as usize)];
         self.windows.push(TrackedWindow {
             xid,
-            damage: 0,
+            damage: damage_handle,
             width: w, height: h,
             backing,
             dirty: true,
@@ -228,6 +255,14 @@ impl X11Compositor {
     }
 
     pub fn shutdown(&mut self) {
+        // Уничтожаем все damage objects чтобы не leak'ать X server resources.
+        for w in &self.windows {
+            if w.damage != 0 {
+                let _ = damage::destroy(&self.conn, w.damage);
+            }
+        }
+        self.windows.clear();
+        let _ = self.conn.flush();
         if let Some(mut x) = self.xephyr.take() {
             let _ = x.kill();
         }

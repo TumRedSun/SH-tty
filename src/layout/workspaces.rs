@@ -28,6 +28,15 @@ pub struct TileMeta {
 
 impl Workspaces {
     pub fn new(max: u8, names: HashMap<u8, String>) -> Self {
+        // Гарантируем минимум 1 workspace — иначе current=1 не найдётся в layouts
+        // и current_layout() запаникует. max=0 возможен только при невалидном
+        // конфиге (workspace_count=0), фиксим на 1 с предупреждением.
+        let max = if max < 1 {
+            log::warn!("workspace_count < 1 is invalid, defaulting to 1");
+            1
+        } else {
+            max
+        };
         let mut layouts = HashMap::new();
         for n in 1..=max {
             layouts.insert(n, Layout::new());
@@ -67,26 +76,28 @@ impl Workspaces {
         let focused_id = self.current_layout().focused?;
         let kind = self.current_layout().focused_kind()?;
         // Удаляем leaf из текущего дерева.
-        // ВНИМАНИЕ: Layout::close_leaf не передаёт метаданных — пользователь
-        // сам решает что делать с освободившимся LeafId. Мы сохраняем ID
-        // и тот же ID используем в целевом workspace.
         self.current_layout_mut().close_leaf(focused_id);
+
         // Открываем leaf с тем же ID в целевом workspace.
-        let target = self.layouts.get_mut(&target_ws).unwrap();
-        // Если в target пусто — просто создаём root leaf.
-        match &mut target.root {
+        // get_mut может вернуть None только если layouts не содержит target_ws,
+        // что возможно при max=0 (невалидный конфиг) — возвращаем None вместо panic.
+        let target = self.layouts.get_mut(&target_ws)?;
+
+        match target.root.take() {
             None => {
+                // Пустой target — создаём root leaf.
                 target.root = Some(Node::leaf(focused_id, kind));
                 target.focused = Some(focused_id);
             }
-            Some(_) => {
-                // Split current focused tile.
+            Some(existing_root) => {
+                // В target уже есть дерево. Если есть focused leaf — split его,
+                // иначе — добавляем как новый root split.
                 let cur_focused = target.focused;
                 if let Some(cf) = cur_focused {
                     let owned_id = focused_id;
                     let owned_kind = kind;
-                    let root = target.root.as_mut().unwrap();
-                    Layout::replace_leaf_external(root, cf, move |old_leaf| {
+                    let mut new_root = existing_root;
+                    Layout::replace_leaf_external(&mut new_root, cf, move |old_leaf| {
                         Node::Split {
                             dir: Direction::Horizontal,
                             ratio: 0.5,
@@ -94,18 +105,17 @@ impl Workspaces {
                             b: Box::new(Node::leaf(owned_id, owned_kind)),
                         }
                     });
-                    target.focused = Some(focused_id);
+                    target.root = Some(new_root);
                 } else {
                     // No focused target — append as root split.
-                    let old_root = target.root.take().unwrap();
                     target.root = Some(Node::Split {
                         dir: Direction::Horizontal,
                         ratio: 0.5,
-                        a: Box::new(old_root),
+                        a: Box::new(existing_root),
                         b: Box::new(Node::leaf(focused_id, kind)),
                     });
-                    target.focused = Some(focused_id);
                 }
+                target.focused = Some(focused_id);
             }
         }
         log::info!("moved tile {:?} from ws {} to ws {}", focused_id, self.current, target_ws);

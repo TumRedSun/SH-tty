@@ -212,16 +212,18 @@ impl Launcher {
             // &str[..50] panics if byte 50 falls inside a multi-byte UTF-8 char.
             let display_name: String = entry.name.chars().take(50).collect();
             text.draw_text(px + 16, ey, &display_name, color, None);
-            // category tag справа
+            // category tag справа — используем chars().count() для корректного
+            // позиционирования с UTF-8 категориями (cat.len() считает байты).
             let cat = &entry.category;
-            let cat_x = px + popup_w_i - 12 - (cat.len() as i32 + 2) * fw;
+            let cat_chars = cat.chars().count() as i32;
+            let cat_x = px + popup_w_i - 12 - (cat_chars + 2) * fw;
             text.draw_text(cat_x, ey, cat, theme.fg_dim, None);
         }
 
         // Footer hint.
         let fy = py + popup_h_i - fh - 8;
         text.draw_text(px + 12, fy, "↑↓ navigate  Enter run  Esc close", theme.fg_dim, None);
-        // count
+        // count — ASCII-only, .len() == chars().count() здесь
         let count = format!("[{}/{}]", self.filtered.len(), self.entries.len());
         let cx = px + popup_w_i - 12 - (count.len() as i32) * fw;
         text.draw_text(cx, fy, &count, theme.accent_cyan, None);
