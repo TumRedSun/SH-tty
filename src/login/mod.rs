@@ -1,39 +1,32 @@
-//! Login screen с PAM аутентификацией.
+//! Login screen с PAM аутентификацией (через privilege separation).
 //!
-//! Поток:
-//!   1. При запуске WM показывает login screen (большой текст по центру, clock, hint).
-//!   2. Пользователь нажимает Enter.
-//!   3. Запрашивается логин (input field).
-//!   4. Запрашивается пароль (input field, символы скрыты).
-//!   5. PAM аутентификация через service "login".
-//!   6. При успехе — переключаем UID/GID на пользователя, загружаем его конфиг,
-//!      запускаем основное WM.
-//!   7. При ошибке — показываем popup с сообщением, возвращаемся к шагу 1.
+//! Поток (см. privsep.rs):
+//!   1. main() запускается от root, открывает DRM/input, fork().
+//!   2. Ребёнок drop_to_login_user() → "superhot-tty", показывает login screen.
+//!   3. При вводе credentials ребёнок отправляет их родителю (root) через
+//!      socketpair; родитель делает PAM auth, возвращает результат.
+//!   4. При успехе ребёнок выходит; родитель drop_to_user(target), запускает WM
+//!      и IPC.
 //!
-//! PAM реализован через FFI к libpam (pam_authenticate, pam_acct_mgmt).
+//! PAM реализован через FFI к libpam. Пароль передаётся через appdata pointer
+//! в PamConv (НЕ через static mut global), что устраняет data race и UB.
+
+pub mod privsep;
 
 use anyhow::{Context, Result};
 use std::ffi::{CString, CStr};
-use std::os::unix::io::RawFd;
-use crate::config::{Config, LoginCfg};
+use crate::config::LoginCfg;
 use crate::render::{Canvas, Font, TextRenderer};
 use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginState {
-    /// Показываем заголовок, ждём нажатия Enter.
     Welcome,
-    /// Ввод логина.
     Username,
-    /// Ввод пароля.
     Password,
-    /// Аутентификация в процессе.
     Authenticating,
-    /// Успех.
     Success,
-    /// Ошибка, показываем сообщение.
     Error,
-    /// Выйти из WM (пользователь нажал Esc на Welcome).
     Quit,
 }
 
@@ -43,7 +36,6 @@ pub struct LoginScreen {
     pub password: String,
     pub error_msg: String,
     pub cursor_blink: u32,
-    /// Если Some — login успешен, пользователь аутентифицирован.
     pub authenticated_user: Option<String>,
     pub uid: u32,
     pub gid: u32,
@@ -101,7 +93,6 @@ impl LoginScreen {
                 match key {
                     "Return" => {
                         self.state = LoginState::Authenticating;
-                        // Аутентификация произойдёт в основном потоке (см. try_authenticate).
                     }
                     "BackSpace" => { self.password.pop(); }
                     "Escape" => {
@@ -129,38 +120,14 @@ impl LoginScreen {
         }
     }
 
-    /// Вызывает PAM для аутентификации. Возвращает Ok(user_info) при успехе.
-    pub fn try_authenticate(&mut self, pam_service: &str) -> Result<()> {
-        let user = self.username.clone();
-        let pass = self.password.clone();
-        match pam_authenticate(&user, &pass, pam_service) {
-            Ok(user_info) => {
-                self.uid = user_info.uid;
-                self.gid = user_info.gid;
-                self.home_dir = user_info.home_dir;
-                self.shell = user_info.shell;
-                self.authenticated_user = Some(user);
-                self.state = LoginState::Success;
-                Ok(())
-            }
-            Err(e) => {
-                self.error_msg = format!("Login failed: {}", e);
-                self.state = LoginState::Error;
-                Err(e)
-            }
-        }
-    }
-
     /// Рендерит login screen на canvas.
     pub fn render(&mut self, canvas: &Canvas, font: &Font, theme: &Theme, cfg: &LoginCfg, screen_w: u32, screen_h: u32) {
         self.cursor_blink = self.cursor_blink.wrapping_add(1);
         let fw = font.width as i32;
         let fh = font.height as i32;
 
-        // BG.
         canvas.fill(theme.bg);
 
-        // Glitch effect на фоне.
         let glitch = 0.15f32;
         if glitch > 0.0 {
             for i in 0..20 {
@@ -173,28 +140,23 @@ impl LoginScreen {
         let title = cfg.effective_title();
         let subtitle = cfg.effective_subtitle();
 
-        // Title — large center text.
         let title_color = cfg.title_color.as_ref()
             .map(|s| { let (r,g,b) = crate::config::parse_color(s); crate::ui::theme::Color(r,g,b) })
             .unwrap_or(theme.accent_magenta);
         let title_x = (screen_w as i32 - (title.len() as i32) * fw * 3) / 2;
         let title_y = (screen_h as i32 / 2) - fh * 4;
-        // Triple-size title (каждый символ = 3x3 block).
         draw_large_text(canvas, font, &title, title_x, title_y, title_color, 3);
 
-        // Subtitle.
         let sub_x = (screen_w as i32 - (subtitle.len() as i32) * fw) / 2;
         let sub_y = title_y + fh * 3 + 10;
         text.draw_text(sub_x, sub_y, &subtitle, theme.fg_dim, None);
 
-        // Clock.
         if cfg.show_clock {
             let now = chrono_now();
             let clock_x = (screen_w as i32 - (now.len() as i32) * fw) / 2;
             text.draw_text(clock_x, sub_y + fh + 8, &now, theme.accent_cyan, None);
         }
 
-        // State-specific UI.
         let center_y = screen_h as i32 / 2 + fh * 2;
         match self.state {
             LoginState::Welcome => {
@@ -212,7 +174,6 @@ impl LoginScreen {
                 let prompt = format!("{} {}", label, self.username);
                 let prompt_x = (screen_w as i32 - (prompt.len() as i32 + 1) * fw) / 2;
                 text.draw_text(prompt_x, center_y, &prompt, theme.fg_default, None);
-                // Cursor.
                 let cx = prompt_x + (prompt.len() as i32) * fw;
                 if (self.cursor_blink / 30) % 2 == 0 {
                     canvas.fill_rect(cx, center_y, fw as u32, fh as u32, theme.accent_magenta);
@@ -237,7 +198,6 @@ impl LoginScreen {
             LoginState::Error => {
                 let msg = &self.error_msg;
                 let mx = (screen_w as i32 - (msg.len() as i32) * fw).max(0) / 2;
-                // Red border around error.
                 let box_w = ((msg.len() as i32 + 4) * fw).min(screen_w as i32 - 40);
                 let box_x = (screen_w as i32 - box_w) / 2;
                 canvas.fill_rect(box_x, center_y - 4, box_w as u32, fh as u32 + 8, theme.popup_bg);
@@ -255,7 +215,6 @@ impl LoginScreen {
             LoginState::Quit => {}
         }
 
-        // Corner brackets (MCD style).
         let cs: i32 = 32;
         let pad: i32 = 16;
         let sw = screen_w as i32;
@@ -271,7 +230,6 @@ impl LoginScreen {
     }
 }
 
-/// Рисует текст большим кеглем (каждый символ = NxN block).
 fn draw_large_text(canvas: &Canvas, font: &Font, text: &str, x: i32, y: i32, color: crate::ui::theme::Color, scale: u32) {
     let fw = font.width as i32;
     let fh = font.height as i32;
@@ -294,7 +252,6 @@ fn draw_large_text(canvas: &Canvas, font: &Font, text: &str, x: i32, y: i32, col
     }
 }
 
-/// Простая реализация времени (без chrono).
 fn chrono_now() -> String {
     let mut t: libc::time_t = 0;
     unsafe { libc::time(&mut t); }
@@ -310,6 +267,7 @@ pub struct UserInfo {
     pub gid: u32,
     pub home_dir: String,
     pub shell: String,
+    pub username: String,
 }
 
 #[cfg(feature = "pam")]
@@ -321,47 +279,60 @@ extern "C" {
     fn pam_acct_mgmt(ph: *mut PamHandle, flags: i32) -> i32;
 }
 
+#[cfg(feature = "pam")]
 #[allow(non_camel_case_types)]
 type PamHandle = libc::c_void;
 
+#[cfg(feature = "pam")]
 #[repr(C)]
 struct PamConv {
     conv: extern "C" fn(num_msg: i32, msg: *mut *const PamMessage, resp: *mut *mut PamResponse, appdata: *mut libc::c_void) -> i32,
     appdata: *mut libc::c_void,
 }
 
+#[cfg(feature = "pam")]
 #[repr(C)]
 struct PamMessage {
     msg_style: i32,
     msg: *const libc::c_char,
 }
 
+#[cfg(feature = "pam")]
 #[repr(C)]
 struct PamResponse {
     resp: *mut libc::c_char,
     resp_retcode: i32,
 }
 
-// Static password storage for PAM callback.
-static mut PAM_PASSWORD: Option<String> = None;
+/// Appdata passed to PAM conv callback — contains the password.
+/// This replaces the old `static mut PAM_PASSWORD` which was UB + data race.
+#[cfg(feature = "pam")]
+struct PamAppData {
+    password: CString,
+}
 
-extern "C" fn pam_conv_fn(num_msg: i32, msg: *mut *const PamMessage, resp: *mut *mut PamResponse, _appdata: *mut libc::c_void) -> i32 {
+#[cfg(feature = "pam")]
+extern "C" fn pam_conv_fn(num_msg: i32, msg: *mut *const PamMessage, resp: *mut *mut PamResponse, appdata: *mut libc::c_void) -> i32 {
     unsafe {
         let responses = libc::calloc(num_msg as usize, std::mem::size_of::<PamResponse>()) as *mut PamResponse;
         if responses.is_null() { return 1; }
+        let appdata_ref: &PamAppData = if appdata.is_null() {
+            return 0;
+        } else {
+            &*(appdata as *const PamAppData)
+        };
         for i in 0..num_msg {
             let m = *msg.offset(i as isize);
             if m.is_null() { continue; }
             let style = (*m).msg_style;
             match style {
                 1 => { // PAM_PROMPT_ECHO_OFF — password
-                    if let Some(pwd) = &PAM_PASSWORD {
-                        let cstr = CString::new(pwd.as_str()).unwrap();
-                        let len = pwd.len() + 1;
-                        let buf = libc::calloc(len, 1) as *mut libc::c_char;
-                        libc::strcpy(buf, cstr.as_ptr());
-                        (*responses.offset(i as isize)).resp = buf;
+                    let pwd_ptr = libc::strdup(appdata_ref.password.as_ptr());
+                    if pwd_ptr.is_null() {
+                        libc::free(responses as *mut _);
+                        return 1;
                     }
+                    (*responses.offset(i as isize)).resp = pwd_ptr;
                 }
                 2 => { // PAM_PROMPT_ECHO_ON — username (skip, we have it)
                 }
@@ -374,38 +345,39 @@ extern "C" fn pam_conv_fn(num_msg: i32, msg: *mut *const PamMessage, resp: *mut 
 }
 
 /// Аутентифицирует пользователя через PAM.
+///
+/// `password` хранится в стеке как PamAppData и передаётся в PAM через
+/// appdata pointer — НЕ через static mut global. Это устраняет data race
+/// и UB предыдущей реализации.
 #[cfg(feature = "pam")]
 pub fn pam_authenticate(username: &str, password: &str, service: &str) -> Result<UserInfo> {
-    unsafe {
-        PAM_PASSWORD = Some(password.to_string());
-    }
-    let service_c = CString::new(service).unwrap();
-    let user_c = CString::new(username).unwrap();
+    let service_c = CString::new(service).context("service contains NUL")?;
+    let user_c = CString::new(username).context("username contains NUL")?;
+    let password_c = CString::new(password).context("password contains NUL")?;
+
+    let appdata = PamAppData { password: password_c };
     let conv = PamConv {
         conv: pam_conv_fn,
-        appdata: std::ptr::null_mut(),
+        appdata: &appdata as *const _ as *mut libc::c_void,
     };
     let mut ph: *mut PamHandle = std::ptr::null_mut();
     let r = unsafe { pam_start(service_c.as_ptr(), user_c.as_ptr(), &conv, &mut ph) };
     if r != 0 {
-        unsafe { PAM_PASSWORD = None; }
         anyhow::bail!("pam_start failed: {}", r);
     }
     let r = unsafe { pam_authenticate_raw(ph, 0) };
     if r != 0 {
-        unsafe { pam_end(ph, r); PAM_PASSWORD = None; }
+        unsafe { pam_end(ph, r); }
         anyhow::bail!("authentication failed (code {})", r);
     }
     let r = unsafe { pam_acct_mgmt(ph, 0) };
     if r != 0 {
-        unsafe { pam_end(ph, r); PAM_PASSWORD = None; }
+        unsafe { pam_end(ph, r); }
         anyhow::bail!("account management failed (code {})", r);
     }
-    unsafe { pam_end(ph, 0); PAM_PASSWORD = None; }
+    unsafe { pam_end(ph, 0); }
 
-    // Получаем user info из /etc/passwd через getpwnam.
-    let user_c2 = CString::new(username).unwrap();
-    let pw = unsafe { libc::getpwnam(user_c2.as_ptr()) };
+    let pw = unsafe { libc::getpwnam(user_c.as_ptr()) };
     if pw.is_null() {
         anyhow::bail!("user '{}' not found in passwd", username);
     }
@@ -417,19 +389,24 @@ pub fn pam_authenticate(username: &str, password: &str, service: &str) -> Result
         gid: pw_ref.pw_gid,
         home_dir,
         shell,
+        username: username.to_string(),
     })
 }
 
-/// Fallback аутентификация без PAM — проверяем через /etc/passwd + /etc/shadow (crypt).
-/// Используется когда libpam недоступен. Менее безопасно (не учитывает PAM политики).
+/// Fallback аутентификация без PAM — через /etc/passwd + /etc/shadow (crypt).
+///
+/// Уязвимости исправлены:
+///   - constant_time_eq для сравнения хэшей (защита от timing attack)
+///   - Throttling (вызывающий код ждёт 2с после каждой попытки)
+///   - Пароль не логируется
 #[cfg(not(feature = "pam"))]
 pub fn pam_authenticate(username: &str, password: &str, _service: &str) -> Result<UserInfo> {
-    use std::io::Read;
-    // Получаем user info из /etc/passwd.
-    let user_c = CString::new(username).unwrap();
+    let user_c = CString::new(username).context("username contains NUL")?;
     let pw = unsafe { libc::getpwnam(user_c.as_ptr()) };
     if pw.is_null() {
-        anyhow::bail!("user '{}' not found in passwd", username);
+        // Same error message as "invalid password" to avoid user enumeration.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        anyhow::bail!("authentication failed");
     }
     let pw_ref = unsafe { &*pw };
     let uid = pw_ref.pw_uid;
@@ -437,9 +414,8 @@ pub fn pam_authenticate(username: &str, password: &str, _service: &str) -> Resul
     let home_dir = unsafe { CStr::from_ptr(pw_ref.pw_dir).to_string_lossy().to_string() };
     let shell = unsafe { CStr::from_ptr(pw_ref.pw_shell).to_string_lossy().to_string() };
 
-    // Читаем /etc/shadow для hash пароля.
     let shadow = std::fs::read_to_string("/etc/shadow")
-        .context("cannot read /etc/shadow (need root)")?;
+        .context("cannot read /etc/shadow (need root — run via privsep parent)")?;
     for line in shadow.lines() {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() < 2 || parts[0] != username { continue; }
@@ -447,25 +423,23 @@ pub fn pam_authenticate(username: &str, password: &str, _service: &str) -> Resul
         if hash.is_empty() || hash == "*" || hash == "!" {
             anyhow::bail!("account locked or no password");
         }
-        // Используем libc crypt() для проверки.
-        let hash_c = CString::new(hash).unwrap();
-        let pass_c = CString::new(password).unwrap();
+        let hash_c = CString::new(hash).context("hash contains NUL")?;
+        let pass_c = CString::new(password).context("password contains NUL")?;
         let result = unsafe { crypt(pass_c.as_ptr(), hash_c.as_ptr()) };
         if result.is_null() {
             anyhow::bail!("crypt() failed");
         }
         let result_str = unsafe { CStr::from_ptr(result).to_string_lossy().to_string() };
-        if result_str != hash {
-            anyhow::bail!("invalid password");
+        // Constant-time comparison to prevent timing attacks.
+        if !constant_time_eq::constant_time_eq(result_str.as_bytes(), hash.as_bytes()) {
+            anyhow::bail!("authentication failed");
         }
-        return Ok(UserInfo { uid, gid, home_dir, shell });
+        return Ok(UserInfo { uid, gid, home_dir, shell, username: username.to_string() });
     }
-    anyhow::bail!("user '{}' not found in shadow", username);
+    // User not in shadow — same error as wrong password (no enumeration).
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    anyhow::bail!("authentication failed");
 }
-
-#[cfg(not(feature = "pam"))]
-#[allow(dead_code)]
-fn _pam_conv_fn_stub() -> i32 { 0 }
 
 #[cfg(not(feature = "pam"))]
 #[link(name = "crypt")]
@@ -474,28 +448,80 @@ extern "C" {
 }
 
 /// Переключает процесс на UID/GID пользователя (после успешной аутентификации).
-pub fn switch_to_user(uid: u32, gid: u32, home_dir: &str) -> Result<()> {
-    // setgid + setuid + initgroups.
+///
+/// Вызывается в root parent процессе ПОСЛЕ выхода privilege-separated child.
+///
+/// Порядок (важно для безопасности):
+///   1. chown XDG_RUNTIME_DIR пользователю (нужен root)
+///   2. setgroups(0, NULL) — очистить supplementary groups (включая root)
+///   3. setgid(target_gid) — сменить primary group
+///   4. initgroups(username, gid) — загрузить группы пользователя
+///   5. setuid(target_uid) — сменить user (безвозвратно для non-root)
+pub fn switch_to_user(uid: u32, gid: u32, username: &str, home_dir: &str) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    // 0. Prepare XDG_RUNTIME_DIR BEFORE dropping privileges (need root for chown).
+    let xdg_runtime = format!("/run/user/{}", uid);
+    if !std::path::Path::new(&xdg_runtime).exists() {
+        match std::fs::DirBuilder::new().mode(0o700).create(&xdg_runtime) {
+            Ok(_) => {
+                let c_path = std::ffi::CString::new(xdg_runtime.as_str()).unwrap();
+                let ret = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+                if ret != 0 {
+                    log::warn!("chown {} failed: {}", xdg_runtime, std::io::Error::last_os_error());
+                } else {
+                    log::info!("created XDG_RUNTIME_DIR {} (uid={}, gid={}, mode=0700)",
+                        xdg_runtime, uid, gid);
+                }
+            }
+            Err(e) => log::warn!("cannot create {}: {}", xdg_runtime, e),
+        }
+    }
+
     unsafe {
+        // 1. Clear supplementary groups FIRST (otherwise we keep root groups).
+        if libc::setgroups(0, std::ptr::null()) != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EPERM) {
+                anyhow::bail!("setgroups failed: {}", err);
+            }
+        }
+        // 2. setgid.
         if libc::setgid(gid) != 0 {
             anyhow::bail!("setgid failed: {}", std::io::Error::last_os_error());
         }
-        if libc::initgroups(std::ptr::null(), gid) != 0 {
+        // 3. initgroups with proper username (NOT null — fixes old bug where
+        //    secondary groups were not loaded, breaking e.g. audio/video access).
+        let user_c = CString::new(username).unwrap();
+        if libc::initgroups(user_c.as_ptr(), gid) != 0 {
             log::warn!("initgroups failed: {}", std::io::Error::last_os_error());
         }
+        // 4. setuid — irreversible for non-root.
         if libc::setuid(uid) != 0 {
             anyhow::bail!("setuid failed: {}", std::io::Error::last_os_error());
         }
     }
+
+    // Verify the switch.
+    let euid = unsafe { libc::geteuid() };
+    if euid != uid {
+        anyhow::bail!("setuid verification failed: euid={} want {}", euid, uid);
+    }
+
+    // 5. Environment.
     std::env::set_var("HOME", home_dir);
-    std::env::set_var("USER", &format!("{}", uid));
+    std::env::set_var("USER", username);
+    std::env::set_var("LOGNAME", username);
     if std::env::var("SHELL").is_err() {
         std::env::set_var("SHELL", "/bin/zsh");
     }
-    // XDG_RUNTIME_DIR для pipewire/portal.
-    let xdg_runtime = format!("/run/user/{}", uid);
     std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime);
-    // Создаём если нет.
-    let _ = std::fs::create_dir_all(&xdg_runtime);
+    // Clear root-inherited sensitive env vars.
+    std::env::remove_var("SUDO_COMMAND");
+    std::env::remove_var("SUDO_USER");
+    std::env::remove_var("SUDO_UID");
+    std::env::remove_var("SUDO_GID");
+
+    log::info!("switched to user '{}' (uid={}, gid={})", username, uid, gid);
     Ok(())
 }

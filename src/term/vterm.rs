@@ -487,11 +487,18 @@ impl VTerm {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse().unwrap_or(0))
             .collect();
-        let n = nums.first().copied().unwrap_or(0).max(1) as u16;
+        // Clamp all numeric parameters to u16 range to prevent truncation panics.
+        // Without this, a CSI like `CSI 999999 H` would truncate to a value
+        // that could exceed self.rows / self.cols and cause out-of-bounds
+        // access in subsequent operations.
+        let clamp_u16 = |v: i32| -> u16 {
+            if v < 1 { 1 } else { (v as u64).min(u16::MAX as u64) as u16 }
+        };
+        let n = clamp_u16(nums.first().copied().unwrap_or(0)).max(1);
         match final_byte {
             b'H' | b'f' => {
-                let row = nums.first().copied().unwrap_or(1).max(1) as u16 - 1;
-                let col = nums.get(1).copied().unwrap_or(1).max(1) as u16 - 1;
+                let row = clamp_u16(nums.first().copied().unwrap_or(1)).saturating_sub(1);
+                let col = clamp_u16(nums.get(1).copied().unwrap_or(1)).saturating_sub(1);
                 self.cursor_y = row.min(self.rows.saturating_sub(1));
                 self.cursor_x = col.min(self.cols.saturating_sub(1));
             }
@@ -510,22 +517,22 @@ impl VTerm {
                 self.cursor_x = 0;
             }
             b'd' => {
-                let row = n.max(1) as u16 - 1;
+                let row = clamp_u16(nums.first().copied().unwrap_or(1)).saturating_sub(1);
                 self.cursor_y = row.min(self.rows.saturating_sub(1));
             }
             b'G' => {
-                let col = n.max(1) as u16 - 1;
+                let col = clamp_u16(nums.first().copied().unwrap_or(1)).saturating_sub(1);
                 self.cursor_x = col.min(self.cols.saturating_sub(1));
             }
             b'J' => self.erase_display(nums.first().copied().unwrap_or(0)),
             b'K' => self.erase_line(nums.first().copied().unwrap_or(0)),
             b'm' => self.handle_sgr(&nums),
             b'r' => {
-                let top = nums.first().copied().unwrap_or(1).max(1) as u16 - 1;
-                let bot = nums.get(1).copied().unwrap_or(self.rows as i32).max(1) as u16;
+                let top = clamp_u16(nums.first().copied().unwrap_or(1)).saturating_sub(1);
+                let bot = clamp_u16(nums.get(1).copied().unwrap_or(self.rows as i32));
                 if top < bot && bot <= self.rows {
                     self.scroll_top = top;
-                    self.scroll_bottom = bot - 1;
+                    self.scroll_bottom = bot.saturating_sub(1);
                     self.cursor_x = 0;
                     self.cursor_y = self.scroll_top;
                 }

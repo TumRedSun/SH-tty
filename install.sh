@@ -27,6 +27,30 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+echo_blue "==> Creating 'superhot-tty' system user for privilege separation..."
+# The login screen runs as this unprivileged user. PAM auth happens in the
+# root parent process via fork+socketpair. The user needs:
+#   - video, render, input groups: to access DRM/input devices inherited from root
+#   - tty group: to use the controlling terminal
+#   - NOT shadow group: prevents direct /etc/shadow reads (auth goes via parent)
+if ! id "superhot-tty" &>/dev/null; then
+    useradd --system \
+        --no-create-home \
+        --home-dir / \
+        --shell /usr/sbin/nologin \
+        --groups video,input,render,tty \
+        --comment "superhot-tty login screen user" \
+        superhot-tty
+    echo_green "Created system user 'superhot-tty'"
+else
+    echo_yellow "User 'superhot-tty' already exists — ensuring group membership"
+    for grp in video input render tty; do
+        if ! id -nG superhot-tty | grep -qw "$grp"; then
+            usermod -aG "$grp" superhot-tty
+        fi
+    done
+fi
+
 echo_blue "==> Checking dependencies..."
 # Основные зависимости.
 DEPS=(

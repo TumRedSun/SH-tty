@@ -46,11 +46,14 @@ pub struct X11Compositor {
 impl X11Compositor {
     pub fn start(display_num: u32, screen_size: (u16, u16)) -> Result<Self> {
         let display = format!(":{}", display_num);
+        // SECURITY: removed `-ac` (access control disabled) — it allowed any
+        // local user to connect to the Xephyr display, read window contents,
+        // and inject input events via XTEST. We now rely on Xauth-based
+        // access control (X server default).
         let xephyr = Command::new("Xephyr")
             .arg(&display)
             .arg("-screen")
             .arg(format!("{}x{}", screen_size.0, screen_size.1))
-            .arg("-ac")
             .arg("-reset")
             .arg("-terminate")
             .arg("-nolisten")

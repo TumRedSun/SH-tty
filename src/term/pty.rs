@@ -51,13 +51,41 @@ impl Pty {
             // Child.
             unsafe {
                 libc::setsid();
-                // TIOCSCTTY = 0x540E
-                libc::ioctl(slave, 0x540E, 0);
+                // TIOCSCTTY = 0x540E — make slave our controlling terminal.
+                const TIOCSCTTY: libc::c_ulong = 0x540E;
+                let _ = libc::ioctl(slave, TIOCSCTTY, 0);
                 libc::dup2(slave, 0);
                 libc::dup2(slave, 1);
                 libc::dup2(slave, 2);
                 if slave > 2 { libc::close(slave); }
                 libc::close(master);
+
+                // SECURITY: Close ALL inherited file descriptors except stdin/stdout/stderr.
+                // Without this, the spawned shell inherits DRM master fd,
+                // /dev/input/event* fds, IPC socket, X11 connection, etc.
+                // A malicious shell script could read these to escalate privileges.
+                //
+                // close_range() is Linux 5.9+. Fallback: iterate /proc/self/fd.
+                const CLOSE_RANGE_UNSET: u32 = 0;
+                let ret = libc::syscall(
+                    436, // SYS_close_range on x86_64
+                    3u32,
+                    u32::MAX,
+                    CLOSE_RANGE_UNSET,
+                );
+                if ret != 0 {
+                    if let Ok(dir) = std::fs::read_dir("/proc/self/fd") {
+                        for entry in dir.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                if let Ok(fd) = name.parse::<i32>() {
+                                    if fd > 2 {
+                                        libc::close(fd);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 std::env::set_var("TERM", "xterm-256color");
                 std::env::set_var("COLORTERM", "truecolor");
@@ -98,7 +126,8 @@ impl Pty {
         self.cols = cols;
         self.rows = rows;
         let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-        let ret = unsafe { libc::ioctl(self.master_fd, 0x5414, &ws) }; // TIOCSWINSZ
+        const TIOCSWINSZ: libc::c_ulong = 0x5414;
+        let ret = unsafe { libc::ioctl(self.master_fd, TIOCSWINSZ, &ws) };
         if ret < 0 {
             anyhow::bail!("TIOCSWINSZ: {}", std::io::Error::last_os_error());
         }

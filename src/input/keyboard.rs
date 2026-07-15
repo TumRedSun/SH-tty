@@ -66,10 +66,8 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    /// Открывает /dev/input/event* для клавиатуры. Если не находит — fallback
-    /// на /dev/tty + K_RAW режим.
+    /// Открывает /dev/input/event* для клавиатуры.
     pub fn open() -> Result<Self> {
-        // Ищем клавиатуру по /dev/input/by-path/.
         let candidates = [
             "/dev/input/by-path/platform-i8042-serio-0-event-kbd",
             "/dev/input/event0",
@@ -81,21 +79,28 @@ impl Keyboard {
             if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
                 use std::os::unix::io::IntoRawFd;
                 let fd = file.into_raw_fd();
-                // Захватываем клавиатуру эксклюзивно (EVIOCGRAB), чтобы
-                // события не шли одновременно в обычный TTY ввод.
-                let ret = unsafe { libc::ioctl(fd, 0x40044590, 1) }; // EVIOCGRAB = 0x40044590
-                if ret < 0 {
-                    log::warn!("EVIOCGRAB failed on {}: {}", path, std::io::Error::last_os_error());
-                }
                 log::info!("keyboard opened: {}", path);
-                return Ok(Keyboard {
-                    fd,
-                    pressed: HashSet::new(),
-                    shift: false, ctrl: false, alt: false, super_: false, altgr: false,
-                });
+                return Keyboard::from_raw_fd(fd);
             }
         }
         anyhow::bail!("no keyboard device found in /dev/input/")
+    }
+
+    /// Wrap an already-opened raw fd. Used after fork in privilege separation:
+    /// parent (root) opens the device, child (superhot-tty user) wraps the
+    /// inherited fd. Applies EVIOCGRAB to prevent events leaking to the
+    /// underlying TTY.
+    pub fn from_raw_fd(fd: RawFd) -> Result<Self> {
+        const EVIOCGRAB: libc::c_ulong = 0x40044590;
+        let ret = unsafe { libc::ioctl(fd, EVIOCGRAB, 1) };
+        if ret < 0 {
+            log::warn!("EVIOCGRAB failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(Keyboard {
+            fd,
+            pressed: HashSet::new(),
+            shift: false, ctrl: false, alt: false, super_: false, altgr: false,
+        })
     }
 
     /// Читает события (неблокирующе). Если данных нет — возвращает пустой вектор.
@@ -145,7 +150,8 @@ impl Keyboard {
 impl Drop for Keyboard {
     fn drop(&mut self) {
         unsafe {
-            libc::ioctl(self.fd, 0x40044590, 0); // EVIOCGRAB release
+            const EVIOCGRAB: libc::c_ulong = 0x40044590;
+            libc::ioctl(self.fd, EVIOCGRAB, 0); // release grab
             libc::close(self.fd);
         }
     }
