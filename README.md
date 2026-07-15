@@ -186,56 +186,56 @@
 ## Архитектура
 
 ```
-+--------------------------------------------------------------------+
-|                       superhot-tty v0.5                            |
-|                                                                    |
-|  1. LOGIN SCREEN (PAM)                                             |
-|     ┌─────────────────────────┐                                    |
-|     │       БОЛЬШЕ / MORE     │                                    |
-|     │   (themed MCD login)    │                                    |
-|     │   login → password      │                                    |
-|     └───────────┬─────────────┘                                    |
-|                 │ PAM auth success                                 |
-|                 ▼                                                  |
-|  2. WM (after switch_to_user)                                      |
-|     +---------+ +-----------+ +----------+ +-------------------+   |
-|     | Keyboard| |  Mouse    | | Gamepad  | |   Config (TOML)   |   |
-|     | (evdev) | |  (evdev)  | | (SDL2/   | |   ~/.config/      |   |
-|     |         | | +cursor   | |  passthru)| |   SH-tty/         |   |
-|     +----+----+ +-----+-----+ +----+-----+ +---------+---------+   |
-|          \           \            /                  |             |
-|     +-----v-----------v----------v-+      +----------v----------+  |
-|     |     Window Rules Engine      |      |     Autostart       |  |
-|     | (match WM_CLASS → placement) |      | (run on WM start)   |  |
-|     +-------------+----------------+      +----------+----------+  |
-|                   |                                 |              |
-|     +-------------v---------------------------------v----------+   |
-|     |     IPC Server ← shtty-msg     Animation Manager       |   |
-|     |     (i3-msg JSON protocol)     (MCD glitch animations) |   |
-|     +-------------+-------------------------------------+----+   |
-|                   |                                     |         |
-|     +-------------v-------------------------------------v------+ |
-|     |              Launcher + Layout + Workspaces             | |
-|     |       (.desktop scanner, BSP tree, 10 ws)               | |
-|     +-------------------------+-------------------------------+ |
-|                               |                                  |
-|                     +---------v---------+                        |
-|                     | Canvas + Font     | ← live-reload         |
-|                     | + VTerm (libvterm)|   theme/animations    |
-|                     +---------+---------+                        |
-|                               |                                  |
-|                     +---------v---------+                        |
-|                     |  Multi-Monitor    |  ← per-monitor CRTC   |
-|                     |  DRM/KMS          |  ← per-monitor ws     |
-|                     |  + DRI3 + Planes  |  ← 0% CPU X11         |
-|                     +-------------------+                        |
-|                                                                    |
-|  Watchers:                                                         |
-|   • ConfigWatcher (inotify) → ConfigDiff → hot-apply              |
-|   • IPC listener thread → IpcRequest → execute                    |
-|                                                                    |
-|  Sidecar: Xephyr :1, PipeWire, xdg-desktop-portal                 |
-+--------------------------------------------------------------------+
++------------------------------------------------------------------------+
+|                           superhot-tty v0.5                            |
+|                                                                        |
+|  1. LOGIN SCREEN (PAM)                                                 |
+|     ┌─────────────────────────┐                                        |
+|     │       БОЛЬШЕ / MORE     │                                        |
+|     │   (themed MCD login)    │                                        |
+|     │   login → password      │                                        |
+|     └───────────┬─────────────┘                                        |
+|                 │ PAM auth success                                     |
+|                 ▼                                                      |
+|  2. WM (after switch_to_user)                                          |
+|     +----------+  +-----------+ +------------+ +--------------------+  |
+|     | Keyboard |  |  Mouse    | | Gamepad    | |   Config (TOML)    |  |
+|     | (evdev)  |  |  (evdev)  | | (SDL2/     | |   ~/.config/       |  |
+|     |          |  |  +cursor  | |  passthru) | |   SH-tty/          |  |
+|     +---+------+  +---+-------+ +--+---------+ +-----+--------------+  |
+|          \            |           /                  |                 |
+|     +-----v-----------v----------v-+      +----------v----------+      |
+|     |     Window Rules Engine      |      |     Autostart       |      |
+|     | (match WM_CLASS → placement) |      | (run on WM start)   |      |
+|     +-------------+----------------+      +---------+-----------+      |
+|                   |                                 |                  |
+|     +-------------v---------------------------------v----------+       |
+|     |     IPC Server ← shtty-msg     Animation Manager         |       |
+|     |     (i3-msg JSON protocol)     (MCD glitch animations)   |       |
+|     +-------------+-------------------------------------+------+       |
+|                   |                                     |              |
+|     +-------------v-------------------------------------v------+       |
+|     |              Launcher + Layout + Workspaces              |       |
+|     |       (.desktop scanner, BSP tree, 10 ws)                |       |
+|     +-------------------------+--------------------------------+       |
+|                               |                                        |
+|                     +---------v---------+                              |
+|                     | Canvas + Font     | ← live-reload                |
+|                     | + VTerm (libvterm)|   theme/animations           |
+|                     +---------+---------+                              |
+|                               |                                        |
+|                     +---------v---------+                              |
+|                     |  Multi-Monitor    |  ← per-monitor CRTC          |
+|                     |  DRM/KMS          |  ← per-monitor ws            |
+|                     |  + DRI3 + Planes  |  ← GPU Aceleration for X11   |
+|                     +-------------------+                              |
+|                                                                        |
+|  Watchers:                                                             |
+|   • ConfigWatcher (inotify) → ConfigDiff → hot-apply                   |
+|   • IPC listener thread → IpcRequest → execute                         |
+|                                                                        |
+|  Sidecar: Xephyr :1, PipeWire, xdg-desktop-portal                      |
++------------------------------------------------------------------------+
 ```
 
 ---
