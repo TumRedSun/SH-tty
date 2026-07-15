@@ -1,8 +1,21 @@
-# superhot-tty v0.3 configuration file.
+# superhot-tty v0.5 configuration file.
 #
 # Place at: ~/.config/SH-tty/config.toml (XDG) or /etc/SH-tty/config.toml (system-wide)
 #
-# Все биндинги и настройки задаются здесь. Нет захардкоженных значений.
+# Все биндинги и настройки задаются здесь. Нет захардкоденных значений.
+#
+# === Privilege Separation Model ===
+# При запуске от root процесс делает следующее:
+#   1. Открывает DRM master fd и /dev/input/event* (нужен root)
+#   2. fork() — ребёнок drop к "superhot-tty" user, показывает login screen
+#      (непривилегированный — не может читать /etc/shadow, не имеет IPC)
+#   3. Родитель (root) принимает credentials через socketpair, делает PAM auth
+#   4. При успехе — родитель drop к вошедшему пользователю, запускает WM + IPC
+#   5. IPC сокет создаётся с правами 0600 + SO_PEERCRED проверкой —
+#      только вошедший пользователь может отправлять команды
+#
+# Системный пользователь "superhot-tty" создаётся install.sh.
+# Он состоит в группах: video, input, render, tty (но НЕ shadow).
 
 [general]
 shell = "zsh"

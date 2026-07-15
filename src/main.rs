@@ -51,13 +51,13 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
-    log::info!("superhot-tty v0.3 starting");
+    log::info!("superhot-tty v0.5 starting (privilege separation mode)");
 
     if unsafe { libc::geteuid() } != 0 {
-        log::warn!("not running as root — DRM master and PAM may fail");
+        anyhow::bail!("superhot-tty must be started as root — it drops privileges internally");
     }
 
-    // 1. Открываем DRM/KMS backend (multi-monitor если конфиг есть).
+    // === PHASE 1: as root, open privileged resources ===
     let cfg_system = Config::load();
     let multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
         Ok(b) => Some(b),
@@ -67,14 +67,12 @@ fn main() -> Result<()> {
         }
     };
 
-    // 2. Fallback на single-monitor Backend.
     let mut single_backend = if multi_backend.is_none() {
         Some(Backend::open(None, None).context("failed to open graphics backend")?)
     } else {
         None
     };
 
-    // 3. Шрифт + canvas для login screen.
     let (canvas_w, canvas_h) = if let Some(mb) = &multi_backend {
         let m = mb.primary_monitor();
         (m.width, m.height)
@@ -88,44 +86,196 @@ fn main() -> Result<()> {
     let canvas = Canvas::new(canvas_w, canvas_h, fmt);
     let font = Font::load_default();
     let theme = build_theme(&cfg_system);
-    let keyboard = Keyboard::open().context("opening keyboard")?;
+    let mut keyboard = Keyboard::open().context("opening keyboard")?;
 
-    // 4. Login screen loop.
-    let mut login_screen = LoginScreen::new();
+    // === PHASE 2: fork for privilege separation ===
+    let (mut parent_sock, mut child_sock) =
+        std::os::unix::net::UnixStream::pair()
+            .context("failed to create socketpair for privsep")?;
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        anyhow::bail!("fork failed: {}", std::io::Error::last_os_error());
+    }
+
+    if pid == 0 {
+        // === CHILD: drop to "superhot-tty", run login UI ===
+        drop(parent_sock);
+
+        login::privsep::drop_to_login_user()
+            .context("failed to drop privileges to superhot-tty user")?;
+
+        let mut login_screen = LoginScreen::new();
+        let target_fps = cfg_system.general.framerate.max(1) as u64;
+        let frame_dur = Duration::from_millis(1000 / target_fps);
+
+        loop {
+            let frame_start = Instant::now();
+
+            let events = keyboard.poll();
+            for ev in events {
+                if let KeyEvent::Press(key) = ev {
+                    let key_str = key_to_string(&key);
+                    login_screen.handle_key(&key_str, keyboard.shift, keyboard.ctrl);
+
+                    if login_screen.state == login::LoginState::Authenticating {
+                        let req = login::privsep::PrivsepMessage::AuthRequest {
+                            username: login_screen.username.clone(),
+                            password: std::mem::take(&mut login_screen.password),
+                        };
+                        if let Err(e) = login::privsep::send_message(&mut child_sock, &req) {
+                            log::error!("privsep send creds: {}", e);
+                            login_screen.state = login::LoginState::Error;
+                            login_screen.error_msg = "internal error".into();
+                            continue;
+                        }
+                        match login::privsep::recv_message(&mut child_sock) {
+                            Ok(login::privsep::PrivsepMessage::AuthResult {
+                                success, error, uid, gid, home_dir, shell,
+                            }) => {
+                                if success {
+                                    login_screen.uid = uid.unwrap_or(0);
+                                    login_screen.gid = gid.unwrap_or(0);
+                                    login_screen.home_dir = home_dir.unwrap_or_default();
+                                    login_screen.shell = shell.unwrap_or_default();
+                                    login_screen.authenticated_user =
+                                        Some(login_screen.username.clone());
+                                    login_screen.state = login::LoginState::Success;
+                                    login_screen.render(&canvas, &font, &theme,
+                                        &cfg_system.login, canvas.width, canvas.height);
+                                    blit_to_backend(&canvas, &multi_backend,
+                                        single_backend.as_mut());
+                                    let _ = flip_backend(&multi_backend, single_backend.as_mut());
+                                    let _ = login::privsep::send_message(&mut child_sock,
+                                        &login::privsep::PrivsepMessage::Quit);
+                                    std::mem::forget(keyboard);
+                                    if let Some(mb) = multi_backend { std::mem::forget(mb); }
+                                    if let Some(sb) = single_backend { std::mem::forget(sb); }
+                                    std::process::exit(0);
+                                } else {
+                                    login_screen.error_msg = error.unwrap_or_else(|| "Login failed".into());
+                                    login_screen.state = login::LoginState::Error;
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("privsep recv result: {}", e);
+                                login_screen.error_msg = "internal error".into();
+                                login_screen.state = login::LoginState::Error;
+                            }
+                            _ => {
+                                login_screen.error_msg = "protocol error".into();
+                                login_screen.state = login::LoginState::Error;
+                            }
+                        }
+                    }
+                    if login_screen.state == login::LoginState::Quit {
+                        let _ = login::privsep::send_message(&mut child_sock,
+                            &login::privsep::PrivsepMessage::Quit);
+                        std::mem::forget(keyboard);
+                        if let Some(mb) = multi_backend { std::mem::forget(mb); }
+                        if let Some(sb) = single_backend { std::mem::forget(sb); }
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            login_screen.render(&canvas, &font, &theme, &cfg_system.login,
+                canvas.width, canvas.height);
+            blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
+            let _ = flip_backend(&multi_backend, single_backend.as_mut());
+
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_dur {
+                std::thread::sleep(frame_dur - elapsed);
+            }
+        }
+    }
+
+    // === PARENT: stay root, do PAM auth ===
+    drop(child_sock);
+
     let mut quit_wm = false;
+    let mut user_info: Option<login::UserInfo> = None;
 
-    login_loop(
-        &mut login_screen,
-        &multi_backend,
-        single_backend.as_mut(),
-        &canvas,
-        &font,
-        &theme,
-        keyboard,
-        &cfg_system,
-        &mut quit_wm,
-    )?;
+    loop {
+        match login::privsep::recv_message(&mut parent_sock) {
+            Ok(login::privsep::PrivsepMessage::AuthRequest { username, password }) => {
+                log::info!("auth request for user '{}'", username);
+                // THROTTLE: 2s sleep on every auth attempt to slow brute-force.
+                std::thread::sleep(Duration::from_secs(2));
 
-    if quit_wm {
-        log::info!("user quit login screen, exiting");
-        return Ok(());
+                let result = login::pam_authenticate(&username, &password, "login");
+                let msg = match &result {
+                    Ok(info) => {
+                        log::info!("auth success: uid={} gid={}", info.uid, info.gid);
+                        login::privsep::PrivsepMessage::AuthResult {
+                            success: true,
+                            error: None,
+                            uid: Some(info.uid),
+                            gid: Some(info.gid),
+                            home_dir: Some(info.home_dir.clone()),
+                            shell: Some(info.shell.clone()),
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("auth failed: {}", e);
+                        login::privsep::PrivsepMessage::AuthResult {
+                            success: false,
+                            error: Some("Login failed".into()),
+                            uid: None, gid: None, home_dir: None, shell: None,
+                        }
+                    }
+                };
+                if let Err(e) = login::privsep::send_message(&mut parent_sock, &msg) {
+                    log::error!("privsep send result: {}", e);
+                    break;
+                }
+                if let Ok(info) = result {
+                    user_info = Some(info);
+                }
+            }
+            Ok(login::privsep::PrivsepMessage::Quit) => {
+                if user_info.is_some() {
+                    break;
+                } else {
+                    let mut status: libc::c_int = 0;
+                    unsafe { libc::waitpid(pid, &mut status, 0); }
+                    log::info!("user quit login screen, exiting");
+                    return Ok(());
+                }
+            }
+            // AuthResult is only sent parent → child, never child → parent.
+            Ok(login::privsep::PrivsepMessage::AuthResult { .. }) => {
+                log::error!("privsep protocol error: received AuthResult from child");
+                anyhow::bail!("privsep protocol violation");
+            }
+            Err(e) => {
+                log::error!("privsep recv: {} — child died?", e);
+                let mut status: libc::c_int = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0); }
+                anyhow::bail!("privsep child communication failed: {}", e);
+            }
+        }
     }
 
-    // 5. Переключаемся на пользователя.
-    let uid = login_screen.uid;
-    let gid = login_screen.gid;
-    let home_dir = login_screen.home_dir.clone();
-    if let Some(user) = &login_screen.authenticated_user {
-        log::info!("authenticated as: {} (uid={}, gid={})", user, uid, gid);
-    }
-    login::switch_to_user(uid, gid, &home_dir)
+    let mut status: libc::c_int = 0;
+    unsafe { libc::waitpid(pid, &mut status, 0); }
+
+    let user_info = user_info.context("no user info after auth")?;
+    log::info!("authenticated as uid={} gid={}", user_info.uid, user_info.gid);
+
+    // Drop the login keyboard — run_wm will open its own.
+    drop(keyboard);
+
+    // === PHASE 3: drop privileges to the logged-in user ===
+    login::switch_to_user(user_info.uid, user_info.gid,
+        &user_info.username, &user_info.home_dir)
         .context("failed to switch user context")?;
 
-    // 6. Загружаем пользовательский конфиг (после switch_to_user, чтобы $HOME был правильный).
+    // === PHASE 4: load user config, start IPC + WM ===
     let cfg = Config::load();
     let theme = build_theme(&cfg);
 
-    // 7. Запускаем основной WM.
     run_wm(
         multi_backend,
         single_backend,
@@ -138,60 +288,6 @@ fn main() -> Result<()> {
 
     log::info!("superhot-tty shutting down");
     Ok(())
-}
-
-/// Login screen loop — показываем themed MCD login до успешной аутентификации.
-fn login_loop(
-    login_screen: &mut LoginScreen,
-    multi_backend: &Option<MultiMonitorBackend>,
-    mut single_backend: Option<&mut Backend>,
-    canvas: &Canvas,
-    font: &Font,
-    theme: &Theme,
-    mut keyboard: Keyboard,
-    cfg: &Config,
-    quit_wm: &mut bool,
-) -> Result<()> {
-    let target_fps = cfg.general.framerate.max(1) as u64;
-    let frame_dur = Duration::from_millis(1000 / target_fps);
-
-    loop {
-        let frame_start = Instant::now();
-
-        // Keyboard.
-        let events = keyboard.poll();
-        for ev in events {
-            if let KeyEvent::Press(key) = ev {
-                let key_str = key_to_string(&key);
-                login_screen.handle_key(&key_str, keyboard.shift, keyboard.ctrl);
-
-                // Если мы в состоянии Authenticating — вызываем PAM.
-                if login_screen.state == login::LoginState::Authenticating {
-                    let _ = login_screen.try_authenticate(&cfg.login.pam_service);
-                }
-                if login_screen.state == login::LoginState::Quit {
-                    *quit_wm = true;
-                    return Ok(());
-                }
-                if login_screen.state == login::LoginState::Success {
-                    return Ok(());
-                }
-            }
-        }
-
-        // Render login screen.
-        login_screen.render(canvas, font, theme, &cfg.login, canvas.width, canvas.height);
-
-        // Blit + flip.
-        blit_to_backend(canvas, multi_backend, single_backend.as_deref_mut());
-        flip_backend(multi_backend, single_backend.as_deref_mut())?;
-
-        // Framerate cap.
-        let elapsed = frame_start.elapsed();
-        if elapsed < frame_dur {
-            std::thread::sleep(frame_dur - elapsed);
-        }
-    }
 }
 
 /// Основной WM после login.

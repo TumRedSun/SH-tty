@@ -42,13 +42,21 @@ env_logger = "0.11"
 # X11 compositor client + XTest (no xinput — он не нужен нам)
 x11rb = { version = "0.13", features = ["composite", "damage", "shm", "xkb", "randr", "render", "xfixes"] }
 
-# Serialization for config
+# Serialization for config + IPC
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
 
 # Misc
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
+
+# Safe shell argument splitting (replaces hand-rolled shell_split — prevents
+# command injection through IPC `exec`).
+shell-words = "1.1"
+
+# Constant-time comparison for password hash checks (prevents timing attacks).
+constant_time_eq = "0.3"
 
 # Gamepad: SDL2 optional (для не-Steam сценария маппинга кнопок в клавиши).
 # Без этой фичи gamepad работает в режиме evdev passthrough (Steam Input нативно).

@@ -208,8 +208,10 @@ impl Launcher {
                 canvas.fill_rect(px + 8, ey - 1, 3, fh as u32 + 2, theme.accent_magenta);
             }
             let color = if is_sel { theme.accent_cyan } else { theme.fg_default };
-            let display_name = if entry.name.len() > 50 { &entry.name[..50] } else { &entry.name };
-            text.draw_text(px + 16, ey, display_name, color, None);
+            // SAFETY: use chars().take() instead of byte slicing — slicing
+            // &str[..50] panics if byte 50 falls inside a multi-byte UTF-8 char.
+            let display_name: String = entry.name.chars().take(50).collect();
+            text.draw_text(px + 16, ey, &display_name, color, None);
             // category tag справа
             let cat = &entry.category;
             let cat_x = px + popup_w_i - 12 - (cat.len() as i32 + 2) * fw;

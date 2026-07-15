@@ -1,5 +1,5 @@
 [Unit]
-Description=SuperHot TTY window manager v0.3 on %I
+Description=SuperHot TTY window manager v0.5 on %I (privilege separation)
 Conflicts=rescue.service
 After=systemd-logind.service systemd-vconsole-setup.service
 Before=getty.target
@@ -21,15 +21,29 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
 
-# Запуск от root (нужен для DRM master, /dev/input/event*, PAM login).
+# Запуск от root — нужен только на старте:
+#   1. Открыть DRM master fd
+#   2. Открыть /dev/input/event*
+#   3. fork() — ребёнок drop к "superhot-tty" (login screen)
+#      родитель остаётся root для PAM auth, затем drop к вошедшему пользователю
+# После успешного входа процесс работает от имени пользователя.
 User=root
 WorkingDirectory=/root
 PAMName=login
 
+# Hardening (совместимо с DRM master requirements).
 ProtectSystem=full
 ProtectHome=false
+PrivateTmp=true
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
 Environment=DISPLAY=:1
-Environment=XDG_RUNTIME_DIR=/run
 Environment=XDG_SESSION_TYPE=desktop
 Environment=XDG_CURRENT_DESKTOP=superhot
 Environment=LANG=en_US.UTF-8

@@ -104,7 +104,11 @@ impl Canvas {
                     ((cur >> 16) & 0xff, (cur >> 8) & 0xff, cur & 0xff),
                 PixelFmt::Bgrx8888 =>
                     (cur & 0xff, (cur >> 8) & 0xff, (cur >> 16) & 0xff),
-                _ => unreachable!(),
+                _ => {
+                    // Unknown format — no-op blend (don't panic, just skip).
+                    drop(buf);
+                    return;
+                }
             };
             let a = alpha as u32;
             let inv = 255 - a;
