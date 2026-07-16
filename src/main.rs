@@ -569,7 +569,7 @@ fn run_wm(
                     &canvas,
                     &font,
                     &mut launcher,
-                    &current_cfg,
+                    &mut current_cfg,
                     &mut animations,
                 );
                 let _ = resp_tx.send(response);
@@ -631,7 +631,7 @@ fn run_wm(
                     if keyboard.super_ {
                         handle_hotkey(key, &mut workspaces, &mut terminals, &mut x11,
                             &mut popups, quit_wm, &mut resize_mode, &mut pending_x11_tile,
-                            &canvas, &font, &keyboard, &mut launcher, &current_cfg)?;
+                            &canvas, &font, &keyboard, &mut launcher, &mut current_cfg)?;
                     } else if resize_mode {
                         let dir = match key {
                             Key::Char('h') | Key::Char('H') => Some(FocusDir::Left),
@@ -958,7 +958,7 @@ fn handle_hotkey(
     font: &Font,
     keyboard: &Keyboard,
     launcher: &mut launcher::Launcher,
-    cfg: &Config,
+    cfg: &mut Config,
 ) -> Result<()> {
     let _ = (font, canvas);
     let key_str = key_to_string(&key);
@@ -1006,7 +1006,7 @@ fn execute_action(
     canvas: &Canvas,
     font: &Font,
     launcher: &mut launcher::Launcher,
-    cfg: &Config,
+    cfg: &mut Config,
 ) -> Result<()> {
     use config::Action::*;
     use config::Direction as CfgDir;
@@ -1071,8 +1071,32 @@ fn execute_action(
         Resize { dir, delta } => workspaces.current_layout_mut().resize_focused(dir_map(dir), delta),
         CycleFocus => workspaces.current_layout_mut().focus_cycle(),
         Quit => *quit = true,
-        TabNext | TabPrev | ToggleLayout | Reload => {
-            popups.push(PopupWidget::info(&format!("action {:?} not implemented yet", action), canvas.width, canvas.height));
+        TabNext => {
+            workspaces.current_layout_mut().tab_next();
+            popups.push(PopupWidget::info("tab: next", canvas.width, canvas.height));
+        }
+        TabPrev => {
+            workspaces.current_layout_mut().tab_prev();
+            popups.push(PopupWidget::info("tab: prev", canvas.width, canvas.height));
+        }
+        ToggleLayout => {
+            workspaces.current_layout_mut().toggle_split_dir();
+            popups.push(PopupWidget::info("layout: split direction toggled", canvas.width, canvas.height));
+        }
+        Reload => {
+            // Перечитываем конфиг с диска и применяем то, что можно на лету.
+            if cfg._config_path.is_some() {
+                let old = cfg.clone();
+                let new_cfg = cfg.reload();
+                let diff = config::watcher::ConfigDiff::from_configs(&old, &new_cfg);
+                if diff.any() {
+                    log::info!("config diff: {:?}", config::watcher::diff_summary(&diff));
+                }
+                *cfg = new_cfg;
+                popups.push(PopupWidget::info("config reloaded", canvas.width, canvas.height));
+            } else {
+                popups.push(PopupWidget::info("reload: no config path known", canvas.width, canvas.height));
+            }
         }
         PopupScript { cmd, args } => {
             // Запускаем скрипт, перехватываем stdout, показываем в popup.
@@ -1446,7 +1470,7 @@ fn handle_ipc_request(
     canvas: &Canvas,
     font: &Font,
     launcher: &mut launcher::Launcher,
-    cfg: &Config,
+    cfg: &mut Config,
     animations: &mut AnimationManager,
 ) -> ipc::IpcResponse {
     use ipc::IpcRequest::*;
@@ -1510,11 +1534,21 @@ fn handle_ipc_request(
                     IpcResponse::Ok("killed focused window".into())
                 }
                 "reload" => {
-                    popups.push(PopupWidget::info("reload requested via IPC",
-                        canvas.width, canvas.height));
-                    // Reload происходит через ConfigWatcher при изменении файла.
-                    // Для IPC reload мы просто сигналим что нужно перечитать.
-                    IpcResponse::Ok("reload triggered".into())
+                    // Перечитываем конфиг с диска и применяем на лету.
+                    if cfg._config_path.is_some() {
+                        let old = cfg.clone();
+                        let new_cfg = cfg.reload();
+                        let diff = config::watcher::ConfigDiff::from_configs(&old, &new_cfg);
+                        if diff.any() {
+                            log::info!("config diff: {:?}", config::watcher::diff_summary(&diff));
+                        }
+                        *cfg = new_cfg;
+                        popups.push(PopupWidget::info("config reloaded via IPC",
+                            canvas.width, canvas.height));
+                        IpcResponse::Ok("config reloaded".into())
+                    } else {
+                        IpcResponse::Error("no config path known".into())
+                    }
                 }
                 "restart" => {
                     *quit = true;
@@ -1590,7 +1624,17 @@ fn handle_ipc_request(
             IpcResponse::Ok(s)
         }
         GetConfig => {
-            IpcResponse::Ok(Config::default_config_toml().to_string())
+            // Возвращаем содержимое конфиг-файла с диска (как он есть),
+            // либо default если путь неизвестен. Это даёт пользователю
+            // актуальный конфиг, который он может редактировать.
+            let cfg_str = match &cfg._config_path {
+                Some(p) => match std::fs::read_to_string(p) {
+                    Ok(s) => s,
+                    Err(e) => format!("# cannot read {}: {}", p.display(), e),
+                },
+                None => Config::default_config_toml().to_string(),
+            };
+            IpcResponse::Ok(cfg_str)
         }
         GetFocused => {
             if let Some(focused_id) = workspaces.current_layout().focused {

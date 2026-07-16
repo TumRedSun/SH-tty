@@ -258,6 +258,59 @@ impl Layout {
         self.focused = Some(next);
     }
 
+    /// Tab to next leaf (cycles forward through all leaves in layout).
+    /// Equivalent to Mod4+Tab behavior in many WMs.
+    pub fn tab_next(&mut self) {
+        self.focus_cycle();
+    }
+
+    /// Tab to previous leaf (cycles backward).
+    pub fn tab_prev(&mut self) {
+        let root = match &self.root { Some(r) => r, None => return };
+        let leaves = Self::collect_leaves_ids(root);
+        if leaves.is_empty() { return; }
+        let cur = self.focused.unwrap_or(leaves[0]);
+        let pos = leaves.iter().position(|&x| x == cur).unwrap_or(0);
+        let prev_pos = if pos == 0 { leaves.len() - 1 } else { pos - 1 };
+        self.focused = Some(leaves[prev_pos]);
+    }
+
+    /// Toggle split direction of the focused tile's parent split.
+    /// Converts Horizontal ↔ Vertical for the split that contains the focused leaf.
+    pub fn toggle_split_dir(&mut self) {
+        let Some(focused_id) = self.focused else { return; };
+        let Some(root) = self.root.as_mut() else { return; };
+        Self::toggle_split_dir_recursive(root, focused_id);
+    }
+
+    fn toggle_split_dir_recursive(node: &mut Node, target: LeafId) -> bool {
+        match node {
+            Node::Leaf { .. } => false,
+            Node::Split { dir, a, b, .. } => {
+                // Check if either child contains the target leaf.
+                let in_a = Self::leaf_exists(a, target);
+                let in_b = Self::leaf_exists(b, target);
+                if in_a || in_b {
+                    // Toggle direction of this split.
+                    *dir = match dir {
+                        Direction::Horizontal => Direction::Vertical,
+                        Direction::Vertical => Direction::Horizontal,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn leaf_exists(node: &Node, id: LeafId) -> bool {
+        match node {
+            Node::Leaf { id: leaf_id, .. } => *leaf_id == id,
+            Node::Split { a, b, .. } => Self::leaf_exists(a, id) || Self::leaf_exists(b, id),
+        }
+    }
+
     pub fn resize_focused(&mut self, dir: FocusDir, delta: f32) {
         let Some(focused_id) = self.focused else { return; };
         let Some(root) = self.root.as_mut() else { return; };
