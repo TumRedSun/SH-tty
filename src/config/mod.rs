@@ -792,12 +792,35 @@ pub fn parse_keycombo(s: &str) -> (Vec<String>, String) {
     (mods, key)
 }
 
+/// Парсит hex-цвет в формате "#RRGGBB" или "RRGGBB".
+///
+/// При невалидном формате возвращает чёрный (0,0,0) И логирует warning —
+/// иначе опечатка в конфиге (например "#GG0000") молча даёт чёрный цвет
+/// и пользователь не понимает почему тема выглядит неправильно.
 pub fn parse_color(s: &str) -> (u8, u8, u8) {
     let s = s.trim_start_matches('#');
-    if s.len() != 6 { return (0, 0, 0); }
-    let r = u8::from_str_radix(&s[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&s[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&s[4..6], 16).unwrap_or(0);
+    if s.len() != 6 {
+        log::warn!("invalid color '#{}' (expected 6 hex digits), using black", s);
+        return (0, 0, 0);
+    }
+    // Проверяем что все символы — hex digits, иначе from_str_radix вернёт Err
+    // и мы молча получим 0. Явная проверка даёт лучший error message.
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        log::warn!("invalid color '#{}' (non-hex characters), using black", s);
+        return (0, 0, 0);
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).unwrap_or_else(|e| {
+        log::warn!("color red channel parse error: {}", e);
+        0
+    });
+    let g = u8::from_str_radix(&s[2..4], 16).unwrap_or_else(|e| {
+        log::warn!("color green channel parse error: {}", e);
+        0
+    });
+    let b = u8::from_str_radix(&s[4..6], 16).unwrap_or_else(|e| {
+        log::warn!("color blue channel parse error: {}", e);
+        0
+    });
     (r, g, b)
 }
 

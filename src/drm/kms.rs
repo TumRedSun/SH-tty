@@ -246,12 +246,13 @@ impl Drop for DumbBuffer {
 
 impl DrmBackend {
     pub fn new(path: &str, _pref_w: Option<u32>, _pref_h: Option<u32>) -> Result<Self> {
-        // 1. Open /dev/dri/card0.
+        // 1. Open DRM device.
+        // CString::new возвращает Err если path содержит NUL — для путей
+        // /dev/dri/card0 это невозможно, но defensive coding требует ?.
+        let path_c = std::ffi::CString::new(path)
+            .with_context(|| format!("DRM path contains NUL: {:?}", path))?;
         let fd = unsafe {
-            libc::open(
-                std::ffi::CString::new(path).unwrap().as_ptr(),
-                libc::O_RDWR | libc::O_CLOEXEC,
-            )
+            libc::open(path_c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC)
         };
         if fd < 0 {
             anyhow::bail!("open {}: {}", path, std::io::Error::last_os_error());
@@ -433,11 +434,12 @@ pub const DRM_MODE_CONNECTED: u32 = 1;
 /// Открывает /dev/dri/card0 (или card1 как fallback).
 pub fn open_drm_card() -> Result<RawFd> {
     for path in &["/dev/dri/card0", "/dev/dri/card1"] {
+        // path — статическая строка без NUL, но CString::new возвращает Result,
+        // unwrap тут технически safe. Используем expect с понятным сообщением.
+        let path_c = std::ffi::CString::new(*path)
+            .expect("DRM path literal contains NUL (should not happen)");
         let fd = unsafe {
-            libc::open(
-                std::ffi::CString::new(*path).unwrap().as_ptr(),
-                libc::O_RDWR | libc::O_CLOEXEC,
-            )
+            libc::open(path_c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC)
         };
         if fd >= 0 { return Ok(fd); }
     }

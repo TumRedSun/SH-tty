@@ -194,16 +194,34 @@ impl VTerm {
     /// Если libvterm активна — проксируем туда и синхронизируем grid.
     pub fn feed(&mut self, data: &[u8]) -> Option<String> {
         if self.libvterm.is_some() {
-            // Берём handle out, feed, потом возвращаем — избегаем borrow conflict.
-            let mut lv = self.libvterm.take().unwrap();
+            // Берём handle out. lv — это owned value (не заём self), поэтому
+            // можем одновременно мутировать self.grid и lv. Если что-то здесь
+            // запаникует, lv будет корректно освобождена через Drop (vterm_free),
+            // а self.libvterm останется None — при следующем feed() переключимся
+            // на fallback parser. Это graceful degradation вместо crash.
+            let mut lv = match self.libvterm.take() {
+                Some(lv) => lv,
+                None => return None,
+            };
+
             lv.feed(data);
             let cols = self.cols;
             let rows = self.rows;
-            // Берём mutable slice из grid.
-            let grid_ptr: *mut Cell = if self.on_alt { self.alt_grid.as_mut_ptr() } else { self.grid.as_mut_ptr() };
-            let len = self.cols as usize * self.rows as usize;
-            let slice: &mut [Cell] = unsafe { std::slice::from_raw_parts_mut(grid_ptr, len) };
+            let len = (cols as usize) * (rows as usize);
+
+            // Берём mutable slice из нужного grid. Используем безопасный
+            // slice indexing вместо raw pointer + from_raw_parts_mut —
+            // это автоматически проверяет длину и не создаёт dangling
+            // slice для пустого Vec (что было UB в старом коде).
+            let grid: &mut [Cell] = if self.on_alt {
+                &mut self.alt_grid
+            } else {
+                &mut self.grid
+            };
+            let effective_len = len.min(grid.len());
+            let slice: &mut [Cell] = &mut grid[..effective_len];
             lv.read_grid(slice, cols, rows);
+
             let (cx, cy) = lv.cursor_pos();
             self.cursor_x = cx.min(cols.saturating_sub(1));
             self.cursor_y = cy.min(rows.saturating_sub(1));

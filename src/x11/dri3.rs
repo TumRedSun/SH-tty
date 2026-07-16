@@ -101,7 +101,10 @@ static XCB_DRI3_LIB: OnceLock<Option<libloading::Library>> = OnceLock::new();
 
 fn load_dri3() -> Option<&'static Dri3Syms> {
     DRI3_SYMS.get_or_init(|| {
-        // Загружаем libxcb и libxcb-dri3.
+        // Загружаем libxcb и libxcb-dri3 по одному разу. Раньше libxcb-dri3
+        // загружалась дважды (один раз для symbol lookup, второй — для static
+        // storage), что wastefully удваивало refcount и могло привести к
+        // use-after-free если бы порядок drop изменился.
         let xcb = unsafe { libloading::Library::new("libxcb.so.1").ok() };
         let xcb_dri3 = unsafe { libloading::Library::new("libxcb-dri3.so.0").ok() };
         if xcb.is_none() || xcb_dri3.is_none() {
@@ -109,10 +112,10 @@ fn load_dri3() -> Option<&'static Dri3Syms> {
             return None;
         }
         let _ = XCB_LIB.set(xcb);
-        // Загружаем libxcb-dri3 второй раз для static storage (Library не Clone).
-        let lib_for_static = unsafe { libloading::Library::new("libxcb-dri3.so.0").ok() };
-        let _ = XCB_DRI3_LIB.set(lib_for_static);
-        let lib = xcb_dri3.as_ref().unwrap();
+        let _ = XCB_DRI3_LIB.set(xcb_dri3);
+        // Теперь берём ту же Library из static storage для symbol lookup —
+        // символы валидны пока жив static (т.е. весь lifetime процесса).
+        let lib = XCB_DRI3_LIB.get().and_then(|o| o.as_ref())?;
         unsafe {
             let query_version = *lib.get(b"xcb_dri3_query_version\0").ok()?;
             let query_version_reply = *lib.get(b"xcb_dri3_query_version_reply\0").ok()?;

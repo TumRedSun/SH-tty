@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::io::Read;
+use anyhow::Context;
 
 #[derive(Debug, Clone)]
 pub struct Font {
@@ -177,24 +178,49 @@ impl Font {
 }
 
 /// Загружает файл, возможно gzip-сжатый (с расширением .gz).
+///
+/// Для .gz файлов вызывает внешний `gunzip -c`. Альтернатива — зависимость
+/// `flate2`, но для PSF шрифтов это избыточно. Корректно завершает child
+/// процесс и проверяет его exit status.
 fn load_maybe_gz(path: &str) -> anyhow::Result<Vec<u8>> {
     let raw = fs::read(path)?;
-    if path.ends_with(".gz") || (raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b) {
-        use std::process::Command;
-        let out = Command::new("gunzip").arg("-c").stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped()).spawn();
-        if let Ok(mut child) = out {
-            {
-                use std::io::Write;
-                let mut stdin = child.stdin.take().unwrap();
-                stdin.write_all(&raw)?;
-            }
-            let mut stdout = child.stdout.take().unwrap();
-            let mut buf = Vec::new();
-            stdout.read_to_end(&mut buf)?;
-            return Ok(buf);
-        }
-        anyhow::bail!("gzip file but gunzip not available");
+    let is_gz = path.ends_with(".gz")
+        || (raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b); // gzip magic
+    if !is_gz {
+        return Ok(raw);
     }
-    Ok(raw)
+
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("gunzip")
+        .arg("-c")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped()) // подавляем stderr gunzip в логи WM
+        .spawn()
+        .context("failed to spawn gunzip — install gzip package")?;
+
+    // Записываем данные в stdin, затем закрываем pipe (drop stdin handle).
+    // Это сигнализирует gunzip что ввод окончен.
+    {
+        let mut stdin = child.stdin.take()
+            .context("gunzip stdin not piped (should not happen)")?;
+        stdin.write_all(&raw)
+            .context("failed to write to gunzip stdin")?;
+        // stdin drops here → pipe closed → gunzip sees EOF
+    }
+
+    // wait_with_output() дочитывает stdout/stderr и дожидается завершения,
+    // предотвращая zombie. Возвращает Output со статусом.
+    let output = child.wait_with_output()
+        .context("failed to wait for gunzip")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gunzip failed (exit {:?}): {}",
+            output.status.code(), stderr.trim());
+    }
+
+    Ok(output.stdout)
 }

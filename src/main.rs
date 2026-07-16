@@ -886,16 +886,18 @@ fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
 fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
     match entry.kind.as_str() {
         "command" => {
-            Command::new(&entry.cmd).args(&entry.args).spawn()?;
+            let mut cmd = Command::new(&entry.cmd);
+            cmd.args(&entry.args);
+            spawn_detached(cmd)?;
             log::info!("autostart (command): {}", entry.cmd);
         }
         "x11" => {
-            let mut c = Command::new(&entry.cmd);
-            c.args(&entry.args)
+            let mut cmd = Command::new(&entry.cmd);
+            cmd.args(&entry.args)
                 .env("DISPLAY", ":1")
                 .env("XDG_SESSION_TYPE", "x11")
                 .env("XDG_CURRENT_DESKTOP", "superhot");
-            c.spawn()?;
+            spawn_detached(cmd)?;
             log::info!("autostart (x11): {}", entry.cmd);
         }
         "terminal" => {
@@ -904,14 +906,41 @@ fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
             } else {
                 format!("{} {}", entry.cmd, entry.args.join(" "))
             };
-            let mut c = Command::new("zsh");
-            c.args(["-c", &format!("exec {}", full_cmd)])
+            let mut cmd = Command::new("zsh");
+            cmd.args(["-c", &format!("exec {}", full_cmd)])
                 .env("TERM", "xterm-256color");
-            c.spawn()?;
+            spawn_detached(cmd)?;
             log::info!("autostart (terminal): {}", full_cmd);
         }
         other => log::warn!("unknown autostart type: {}", other),
     }
+    Ok(())
+}
+
+/// Запускает процесс и гарантирует что он не станет zombie.
+///
+/// `spawn()` возвращает `Child` handle. Если handle просто dropнуть, процесс
+/// при завершении станет zombie (ядро держит его в таблице процессов пока
+/// родитель не вызовет `wait()`). Для fire-and-forget процессов (autostart,
+/// launcher, IPC exec) мы не хотим хранить handle, но и zombies копить тоже.
+///
+/// Решение: spawn'ут lightweight reaper-thread, который блокируется на
+/// `child.wait()`. Когда процесс завершается, thread reap'ает его и выходит.
+/// Это не влияет на PTY-процессы (у них waitpid в Pty::is_alive) и не требует
+/// process-global signal handling.
+fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
+    let child = cmd.spawn()?;
+    let name = format!("reaper-{}", child.id());
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        })
+        .map_err(|e| {
+            log::warn!("failed to spawn reaper thread: {}", e);
+            e
+        })?;
     Ok(())
 }
 
@@ -990,7 +1019,13 @@ fn execute_action(
     match action {
         Terminal => spawn_term(workspaces, terminals, Direction::Horizontal, canvas, font, cfg),
         Launcher => launcher.toggle(),
-        Spawn { cmd, args } => { let _ = Command::new(&cmd).args(&args).spawn(); }
+        Spawn { cmd, args } => {
+            let mut c = Command::new(&cmd);
+            c.args(&args);
+            if let Err(e) = spawn_detached(c) {
+                log::warn!("spawn '{}' failed: {}", cmd, e);
+            }
+        }
         SpawnX11 { cmd, args } => {
             if let Some(x) = x11.as_mut() {
                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
@@ -1459,7 +1494,9 @@ fn handle_ipc_request(
                         std::thread::spawn(move || {
                             let mut c = std::process::Command::new(&cmd_owned);
                             c.args(&args_owned).env("DISPLAY", &display);
-                            let _ = c.spawn();
+                            if let Err(e) = spawn_detached(c) {
+                                log::warn!("IPC exec '{}' failed: {}", cmd_owned, e);
+                            }
                         });
                         return IpcResponse::Ok(format!("executed: {}", cmd_name));
                     }

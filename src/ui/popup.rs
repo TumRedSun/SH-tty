@@ -89,12 +89,21 @@ impl Popup {
         }
     }
 
-    /// Создаёт popup с multiline ASCII контентом (например из скрипта).
+    /// Создаёт popup с multiline контентом (например из скрипта).
+    ///
+    /// Размер popup рассчитывается по количеству Unicode-символов (chars),
+    /// а не по байтам — иначе русские/CJK строки дают слишком широкий popup
+    /// (UTF-8: "Привет" = 12 bytes, но 6 cells в fixed-width шрифте).
     pub fn script(content: &str, screen_w: u32, screen_h: u32) -> Self {
-        // Размер popup зависит от количества строк и максимальной длины.
         let lines: Vec<&str> = content.lines().collect();
-        let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(20).max(20);
-        let w = ((max_len as u32 + 4) * 8).min(screen_w * 2 / 3).max(300);
+        // Считаем chars().count() — количество графем для fixed-width шрифта.
+        // Для BMP chars это совпадает с cell width в PSF-шрифтах.
+        let max_len = lines.iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(20)
+            .max(20) as u32;
+        let w = ((max_len + 4) * 8).min(screen_w * 2 / 3).max(300);
         let h = ((lines.len() as u32 + 4) * 16).min(screen_h * 3 / 4).max(100);
         Popup {
             kind: PopupKind::Script(content.to_string()),
