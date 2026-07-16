@@ -7,7 +7,6 @@
 //! Если ничего не найдено — используется процедурный встроенный шрифт 8x16.
 
 use std::fs;
-use std::io::Read;
 use anyhow::Context;
 
 #[derive(Debug, Clone)]

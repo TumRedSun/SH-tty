@@ -17,6 +17,7 @@ pub struct LeafId(pub u64);
 pub enum Direction { Horizontal, Vertical }
 
 impl Direction {
+    #[allow(dead_code)] // utility, not currently called
     pub fn opposite(self) -> Self {
         match self { Direction::Horizontal => Direction::Vertical, Direction::Vertical => Direction::Horizontal }
     }

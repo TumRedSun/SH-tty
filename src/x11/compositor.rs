@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::composite::{self, Redirect};
 use x11rb::protocol::damage::{self, Damage};
-use x11rb::protocol::xproto::{self, *};
+use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use std::process::{Command, Child};
 
@@ -31,11 +31,17 @@ pub struct TrackedWindow {
     /// ARGB backing store, layout: row-major, top-to-bottom, len = w*h.
     pub backing: Vec<u32>,
     pub dirty: bool,
+    /// Window title (from WM_NAME). Stored for future display in tile border
+    /// or title bar; currently not rendered.
+    #[allow(dead_code)]
     pub title: String,
 }
 
 pub struct X11Compositor {
     pub conn: RustConnection,
+    /// Root window XID. Stored for future root-window property queries
+    /// (e.g. _NET_CLIENT_LIST); currently not used after init.
+    #[allow(dead_code)]
     pub root: u32,
     pub windows: Vec<TrackedWindow>,
     pub xephyr: Option<Child>,

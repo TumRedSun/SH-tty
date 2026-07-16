@@ -18,15 +18,13 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 #[cfg(not(feature = "gamepad-sdl2"))]
-pub struct GamepadManager {
-    pub passthrough_note: String,
-}
+pub struct GamepadManager;
 
 #[cfg(not(feature = "gamepad-sdl2"))]
 impl GamepadManager {
     pub fn new(_keymap: HashMap<String, String>, _stick_sensitivity: u32, _enabled: bool) -> Result<Self> {
         log::info!("gamepad: evdev passthrough mode (no SDL2). Steam Input works natively.");
-        Ok(GamepadManager { passthrough_note: "evdev passthrough".into() })
+        Ok(GamepadManager)
     }
 
     pub fn poll(&mut self) -> Vec<GamepadKey> {
@@ -157,6 +155,7 @@ impl GamepadManager {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Press/Release constructed only with gamepad-sdl2 feature
 pub enum GamepadKey {
     Press(String),
     Release(String),

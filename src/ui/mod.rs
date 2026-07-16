@@ -1,5 +1,5 @@
 pub mod theme;
 pub mod popup;
 
-pub use theme::{Color, PixelFmt, Theme, ANSI_PALETTE};
-pub use popup::{Popup, PopupKind};
+pub use theme::{Color, PixelFmt, Theme};
+pub use popup::Popup;

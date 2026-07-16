@@ -15,6 +15,7 @@ use crate::render::font::Font;
 use crate::ui::theme::{Color, Theme};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Alert/Prompt/KillCam variants reserved for future popup types
 pub enum PopupKind {
     /// «SYSTEM ALERT» в стиле MCD — крупный текст по центру.
     Alert,
@@ -41,7 +42,8 @@ pub struct Popup {
 }
 
 impl Popup {
-    pub fn alert(text: &str, screen_w: u32, screen_h: u32) -> Self {
+    #[allow(dead_code)] // reserved for future MCD-style alerts
+    pub fn alert(_text: &str, screen_w: u32, screen_h: u32) -> Self {
         let w = screen_w.min(800);
         let h = 120;
         Popup {
@@ -54,6 +56,7 @@ impl Popup {
         }
     }
 
+    #[allow(dead_code)] // reserved for future text-input popups
     pub fn prompt(initial: &str, screen_w: u32, screen_h: u32) -> Self {
         let w = screen_w.min(600);
         let h = 60;
@@ -67,7 +70,7 @@ impl Popup {
         }
     }
 
-    pub fn info(text: &str, screen_w: u32, screen_h: u32) -> Self {
+    pub fn info(text: &str, screen_w: u32, _screen_h: u32) -> Self {
         let w = screen_w.min(500);
         let h = 80;
         Popup {
@@ -80,6 +83,7 @@ impl Popup {
         }
     }
 
+    #[allow(dead_code)] // reserved for future window-close animation
     pub fn killcam(screen_w: u32, screen_h: u32) -> Self {
         Popup {
             kind: PopupKind::KillCam,

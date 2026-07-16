@@ -12,7 +12,7 @@
 //! Альтернатива: открыть /dev/input/by-path/*-event-kbd напрямую. Это даёт
 //! доступ к сканкодам без K_RAW. Используем это как fallback.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::os::unix::io::RawFd;
 use std::collections::HashSet;
 
@@ -48,6 +48,7 @@ pub enum Key {
 }
 
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)] // Release(Key) produced but Key not read (release events ignored)
 pub enum KeyEvent {
     Press(Key),
     Release(Key),
@@ -142,6 +143,7 @@ impl Keyboard {
         events
     }
 
+    #[allow(dead_code)] // utility for future key-combo detection
     pub fn is_pressed(&self, code: u16) -> bool {
         self.pressed.contains(&code)
     }

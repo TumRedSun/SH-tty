@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 
 use config::Config;
 use drm::{Backend, MultiMonitorBackend};
-use layout::{Direction, FocusDir, Layout, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
+use layout::{Direction, FocusDir, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
 use render::{Canvas, Font, TextRenderer};
-use render::glitch::{AnimationManager, CharSnapshot, snapshot_workspace};
+use render::glitch::{AnimationManager, snapshot_workspace};
 use term::{Pty, VTerm};
 use ui::{Theme, Popup as PopupWidget, PixelFmt, Color};
 use input::{Keyboard, Key, KeyEvent};
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
 
     // === PHASE 1: as root, open privileged resources ===
     let cfg_system = Config::load();
-    let multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
+    let mut multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
         Ok(b) => Some(b),
         Err(e) => {
             log::warn!("Multi-monitor init failed: {} — falling back to single DRM", e);
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
                                         &cfg_system.login, canvas.width, canvas.height);
                                     blit_to_backend(&canvas, &multi_backend,
                                         single_backend.as_mut());
-                                    let _ = flip_backend(&multi_backend, single_backend.as_mut());
+                                    let _ = flip_backend(&mut multi_backend, single_backend.as_mut());
                                     let _ = login::privsep::send_message(&mut child_sock,
                                         &login::privsep::PrivsepMessage::Quit);
                                     std::mem::forget(keyboard);
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
             login_screen.render(&canvas, &font, &theme, &cfg_system.login,
                 canvas.width, canvas.height);
             blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
-            let _ = flip_backend(&multi_backend, single_backend.as_mut());
+            let _ = flip_backend(&mut multi_backend, single_backend.as_mut());
 
             let elapsed = frame_start.elapsed();
             if elapsed < frame_dur {
@@ -293,7 +293,7 @@ fn main() -> Result<()> {
 /// Основной WM после login.
 #[allow(clippy::too_many_arguments)]
 fn run_wm(
-    multi_backend: Option<MultiMonitorBackend>,
+    mut multi_backend: Option<MultiMonitorBackend>,
     mut single_backend: Option<Backend>,
     canvas: Canvas,
     font: Font,
@@ -482,7 +482,7 @@ fn run_wm(
     };
 
     // === IPC server ===
-    let mut ipc_server: Option<ipc::IpcServer> = if cfg.ipc.enabled {
+    let ipc_server: Option<ipc::IpcServer> = if cfg.ipc.enabled {
         match ipc::IpcServer::start(&cfg.ipc) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -830,7 +830,7 @@ fn run_wm(
 
         // 7. Flip.
         blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
-        flip_backend(&multi_backend, single_backend.as_mut())?;
+        flip_backend(&mut multi_backend, single_backend.as_mut())?;
 
         // 8. Popups tick.
         for p in popups.iter_mut() { p.tick(); }
@@ -849,8 +849,8 @@ fn run_wm(
 
 /// Получает WM_CLASS и WM_NAME для window rules matching.
 fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{get_property, get_atom_name, ConnectionExt};
+    
+    use x11rb::protocol::xproto::{get_property, ConnectionExt};
     let conn = &x.conn;
     // WM_CLASS atom.
     let wm_class_atom = conn.intern_atom(false, b"WM_CLASS").ok()
@@ -1419,9 +1419,12 @@ fn blit_to_backend(canvas: &Canvas, multi: &Option<MultiMonitorBackend>, single:
     }
 }
 
-fn flip_backend(multi: &Option<MultiMonitorBackend>, single: Option<&mut Backend>) -> Result<()> {
-    if let Some(_mb) = multi {
-        // Multi-monitor flip требует &mut — обрабатывается в run_wm.
+fn flip_backend(
+    multi: &mut Option<MultiMonitorBackend>,
+    single: Option<&mut Backend>,
+) -> Result<()> {
+    if let Some(mb) = multi {
+        mb.flip_all()?;
     } else if let Some(sb) = single {
         sb.flip()?;
     }
@@ -1438,8 +1441,8 @@ fn handle_ipc_request(
     x11: &mut Option<x11::X11Compositor>,
     popups: &mut Vec<PopupWidget>,
     quit: &mut bool,
-    resize_mode: &mut bool,
-    pending_x11_tile: &mut Option<LeafId>,
+    _resize_mode: &mut bool,
+    _pending_x11_tile: &mut Option<LeafId>,
     canvas: &Canvas,
     font: &Font,
     launcher: &mut launcher::Launcher,

@@ -7,6 +7,7 @@
 pub struct Color(pub u8, pub u8, pub u8);
 
 impl Color {
+    #[allow(dead_code)] // utility constructor, currently Color() used directly
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self { Color(r, g, b) }
     pub const fn as_u32(&self, fmt: PixelFmt) -> u32 {
         match fmt {
@@ -15,12 +16,13 @@ impl Color {
             PixelFmt::Bgrx8888 =>
                 ((self.2 as u32) << 16) | ((self.1 as u32) << 8) | (self.0 as u32),
             PixelFmt::Rgb565 =>
-                (((self.0 as u32 >> 3) << 11) | ((self.1 as u32 >> 2) << 5) | (self.2 as u32 >> 3)),
+                ((self.0 as u32 >> 3) << 11) | ((self.1 as u32 >> 2) << 5) | (self.2 as u32 >> 3),
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Argb8888/Bgrx8888/Rgb565 kept for format-completeness
 pub enum PixelFmt {
     Xrgb8888,
     Argb8888,

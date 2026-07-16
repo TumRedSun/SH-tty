@@ -170,6 +170,10 @@ pub fn query_version(xcb_conn: *mut libc::c_void) -> Result<Dri3Version> {
 /// Получает DRM fd от X-сервера через DRI3Open.
 /// Этот fd аутентифицирован для нашего процесса — можно использовать
 /// для PRIME импорта dma-buf.
+///
+/// Сейчас не вызывается — DRI3 PixmapFromBuffer не реализован (см. dmabuf.rs).
+/// Оставлен для будущей реализации GPU-accelerated X11 rendering.
+#[allow(dead_code)]
 pub fn open_drm_fd(xcb_conn: *mut libc::c_void, window: u32) -> Result<RawFd> {
     let syms = load_dri3().context("DRI3 not available")?;
     unsafe {
@@ -207,6 +211,7 @@ pub fn open_drm_fd(xcb_conn: *mut libc::c_void, window: u32) -> Result<RawFd> {
 
 /// DMA-BUF дескриптор для X11 pixmap.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // depth/bpp populated by DRI3 reply, not yet consumed
 pub struct DmaBuf {
     pub fd: RawFd,
     pub width: u32,

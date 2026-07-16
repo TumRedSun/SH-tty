@@ -61,6 +61,7 @@ impl AudioStack {
 
     /// Устанавливает системную громкость (0..100).
     /// Возвращает ошибку если pactl не смог выполнить команду.
+    #[allow(dead_code)] // not wired to keybindings yet
     pub fn set_volume(volume: u32) -> Result<()> {
         let output = Command::new("pactl")
             .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{}%", volume)])
@@ -74,6 +75,7 @@ impl AudioStack {
     }
 
     /// Mute toggle.
+    #[allow(dead_code)] // not wired to keybindings yet
     pub fn toggle_mute() -> Result<()> {
         let output = Command::new("pactl")
             .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])

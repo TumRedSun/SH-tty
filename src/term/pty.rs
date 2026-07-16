@@ -3,16 +3,13 @@
 //! Использует libc::openpty + fork+exec. Это надёжнее чем nix-обёртки,
 //! так как nix::pty::openpty возвращает OwnedFd, а нам нужен raw fd.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::os::unix::io::RawFd;
 use std::ffi::CString;
 
 pub struct Pty {
     pub master_fd: RawFd,
-    pub slave_fd: RawFd,
     pub pid: i32,
-    pub cols: u16,
-    pub rows: u16,
 }
 
 impl Pty {
@@ -115,16 +112,14 @@ impl Pty {
         log::info!("spawned shell '{}' (pid={}, master_fd={})", shell, pid, master);
         Ok(Pty {
             master_fd: master,
-            slave_fd: -1,
             pid,
-            cols,
-            rows,
         })
     }
 
+    /// Resize PTY window. Sends TIOCSWINSZ to the slave so the child
+    /// process receives SIGWINCH and updates its terminal dimensions.
+    #[allow(dead_code)] // currently unused, kept for future resize support
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
-        self.cols = cols;
-        self.rows = rows;
         let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         const TIOCSWINSZ: libc::c_ulong = 0x5414;
         let ret = unsafe { libc::ioctl(self.master_fd, TIOCSWINSZ, &ws) };
@@ -152,12 +147,6 @@ impl Pty {
             anyhow::bail!("pty write: {}", std::io::Error::last_os_error());
         }
         Ok(n as usize)
-    }
-
-    pub fn is_alive(&self) -> bool {
-        let mut status: i32 = 0;
-        let ret = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
-        ret == 0
     }
 }
 

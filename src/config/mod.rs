@@ -130,7 +130,12 @@ impl Default for ThemeCfg {
 }
 
 /// Конфигурация login screen.
+///
+/// Поля `title_font`, `pam_service`, `auto_start_session` парсятся из TOML
+/// для будущей функциональности (кастомный шрифт заголовка, выбор PAM service,
+/// auto-start session). Сейчас не используются — помечены allow(dead_code).
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct LoginCfg {
     /// Текст по центру экрана (как в SHMCD). Например "MORE", "БОЛЬШЕ" или свой текст.
     pub title: String,
@@ -309,7 +314,11 @@ pub struct WindowRule {
 }
 
 /// Запись автозапуска. Запускается при старте WM.
+///
+/// Поля `workspace` и `monitor` парсятся но не применяются —
+/// помечены allow(dead_code) для future use.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct AutostartEntry {
     /// Тип команды: "x11" (графическая), "terminal" (в нашем терминале),
     /// "command" (фоновый процесс, без UI).
@@ -330,6 +339,7 @@ pub struct AutostartEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // max_rows, x11_display — parsed for future use
 pub struct LauncherCfg {
     #[serde(default)]
     pub desktop_paths: Vec<String>,
@@ -365,7 +375,11 @@ impl Default for LauncherCfg {
 }
 
 /// Конфигурация popups (центральный MCD-styled popup).
+///
+/// Поля `max_width_pct`, `glitch_border`, `font` парсятся но не применяются —
+/// помечены allow(dead_code) для future use.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct PopupsCfg {
     /// Длительность показа popup (в кадрах, при framerate=60 → 240 = 4 сек).
     #[serde(default = "default_popup_duration")]
@@ -396,6 +410,7 @@ impl Default for PopupsCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // default_volume parsed for future use
 pub struct AudioCfg {
     #[serde(default = "default_true")]
     pub start_pipewire_pulse: bool,
@@ -441,6 +456,7 @@ impl Default for PortalCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // steam_passthrough parsed for future use
 pub struct GamepadCfg {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -784,16 +800,7 @@ impl Default for Config {
     }
 }
 
-pub fn parse_keycombo(s: &str) -> (Vec<String>, String) {
-    let parts: Vec<&str> = s.split('+').collect();
-    if parts.is_empty() { return (vec![], s.to_string()); }
-    let key = parts.last().unwrap().to_string();
-    let mods = parts[..parts.len()-1].iter().map(|s| s.to_string()).collect();
-    (mods, key)
-}
-
 /// Парсит hex-цвет в формате "#RRGGBB" или "RRGGBB".
-///
 /// При невалидном формате возвращает чёрный (0,0,0) И логирует warning —
 /// иначе опечатка в конфиге (например "#GG0000") молча даёт чёрный цвет
 /// и пользователь не понимает почему тема выглядит неправильно.

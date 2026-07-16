@@ -26,12 +26,8 @@ const DRM_IOCTL_MODE_GETPLANERESOURCES: u32 = iowr(0xA0, 0x36, std::mem::size_of
 const DRM_IOCTL_MODE_GETPLANE: u32 = iowr(0xA0, 0x37, std::mem::size_of::<DrmModeGetPlane>() as u32);
 // DRM_IOCTL_MODE_SETPLANE (legacy, non-atomic)
 const DRM_IOCTL_MODE_SETPLANE: u32 = iow(0xA0, 0x38, std::mem::size_of::<DrmModeSetPlane>() as u32);
-// DRM_IOCTL_MODE_ATOMIC
-const DRM_IOCTL_MODE_ATOMIC: u32 = iow(0xA0, 0x5A, std::mem::size_of::<DrmModeAtomic>() as u32);
 // DRM_IOCTL_PRIME_FD_TO_HANDLE
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = iowr(0x64, 0x2E, std::mem::size_of::<DrmPrimeHandle>() as u32);
-// DRM_IOCTL_PRIME_HANDLE_TO_FD
-const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = iowr(0x64, 0x2D, std::mem::size_of::<DrmPrimeHandle>() as u32);
 // DRM_IOCTL_MODE_ADDFB2
 const DRM_IOCTL_MODE_ADDFB2: u32 = iowr(0xA0, 0xB8, std::mem::size_of::<DrmModeFbCmd2>() as u32);
 // DRM_IOCTL_MODE_RMFB
@@ -102,8 +98,13 @@ struct DrmModeFbCmd2 {
     modifier: [u64; 4],
 }
 
+// DrmModeAtomic — структура для DRM_IOCTL_MODE_ATOMIC (atomic commit).
+// Сейчас не используется (используем legacy SETPLANE), но оставлена для
+// будущей реализации atomic modesetting. Помечена allow(dead_code) чтобы
+// не засорять warnings.
 #[repr(C)]
 #[derive(Default, Debug)]
+#[allow(dead_code)]
 struct DrmModeAtomic {
     flags: u32,
     count_objs: u32,
@@ -123,7 +124,6 @@ const DRM_PLANE_TYPE_CURSOR: u32 = 2;
 #[derive(Debug, Clone)]
 pub struct Plane {
     pub id: u32,
-    pub possible_crtcs: u32,
     pub kind: u32, // DRM_PLANE_TYPE_*
 }
 
@@ -209,6 +209,7 @@ impl OverlayManager {
     }
 
     /// Обновляет позицию overlay для окна (без пересоздания fb).
+    #[allow(dead_code)] // overlay positioning not yet wired into WM main loop
     pub fn update_position(&mut self, x11_window_id: u32, x: i32, y: i32, w: u32, h: u32) -> Result<()> {
         let assignment = self.assignments.get(&x11_window_id)
             .context("window not assigned to overlay")?;
@@ -220,6 +221,7 @@ impl OverlayManager {
     }
 
     /// Освобождает overlay plane для окна.
+    #[allow(dead_code)] // overlay teardown not yet wired into WM main loop
     pub fn unassign_window(&mut self, x11_window_id: u32) -> Result<()> {
         if let Some(assignment) = self.assignments.remove(&x11_window_id) {
             // Disable plane (fb_id = 0).
@@ -243,7 +245,7 @@ impl OverlayManager {
     }
 
     /// Находит свободный overlay plane для указанного CRTC.
-    fn find_free_overlay_plane(&self, crtc_id: u32) -> Option<u32> {
+    fn find_free_overlay_plane(&self, _crtc_id: u32) -> Option<u32> {
         // TODO: properly map crtc_id to possible_crtcs bitmask.
         // Для упрощения возвращаем первый overlay plane не занятый в assignments.
         let used_planes: std::collections::HashSet<u32> = self.assignments.values()
@@ -275,7 +277,6 @@ fn enumerate_planes(fd: RawFd) -> Result<Vec<Plane>> {
         let kind = if p.fb_id == 0 { DRM_PLANE_TYPE_OVERLAY } else { DRM_PLANE_TYPE_PRIMARY };
         planes.push(Plane {
             id: *pid,
-            possible_crtcs: p.possible_crtcs,
             kind,
         });
     }

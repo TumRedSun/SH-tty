@@ -13,18 +13,12 @@
 
 use anyhow::{Context, Result};
 use std::os::unix::io::RawFd;
-use std::path::Path;
 
 // ===== DRM ioctl definitions =====
 // Эти константы одинаковые на всех Linux-архитектурах (x86, x86_64, aarch64).
 
-const DRM_IOCTL_BASE: u32 = b'd' as u32;
-
 // ioctls (MAGIC, NR, SIZE, DIR): encoded as 0x<DIR><SIZE><NR><TYPE>
 // TYPE = 'd' = 0x64
-// NR for each command:
-const DRM_IOCTL_VERSION: u32         = ior(0, 0, 24); // version
-const DRM_IOCTL_GET_MAGIC: u32       = ior(0, 2, 6);
 const DRM_IOCTL_SET_MASTER: u32      = io(0x64, 0x1e); // no args
 const DRM_IOCTL_DROP_MASTER: u32     = io(0x64, 0x1f);
 
@@ -32,9 +26,7 @@ const DRM_IOCTL_DROP_MASTER: u32     = io(0x64, 0x1f);
 const DRM_IOCTL_MODE_GETRESOURCES: u32      = ior(0xA0, 0, std::mem::size_of::<drm_mode_card_res>() as u32);
 const DRM_IOCTL_MODE_GETCONNECTOR: u32      = iowr(0xA0, 7, std::mem::size_of::<drm_mode_get_connector>() as u32);
 const DRM_IOCTL_MODE_GETENCODER: u32        = ior(0xA0, 8, std::mem::size_of::<drm_mode_get_encoder>() as u32);
-const DRM_IOCTL_MODE_GETCRTC: u32           = iowr(0xA0, 9, std::mem::size_of::<drm_mode_crtc>() as u32);
 const DRM_IOCTL_MODE_SETCRTC: u32           = iow(0xA0, 10, std::mem::size_of::<drm_mode_crtc>() as u32);
-// (CURSOR не используется в MVP)
 const DRM_IOCTL_MODE_CREATE_DUMB: u32       = iowr(0xA0, 0xB2, std::mem::size_of::<drm_mode_create_dumb>() as u32);
 const DRM_IOCTL_MODE_MAP_DUMB: u32          = iowr(0xA0, 0xB3, std::mem::size_of::<drm_mode_map_dumb>() as u32);
 const DRM_IOCTL_MODE_DESTROY_DUMB: u32      = iowr(0xA0, 0xB4, std::mem::size_of::<drm_mode_destroy_dumb>() as u32);
@@ -50,7 +42,6 @@ const DRM_IOCTL_MODE_PAGE_FLIP: u32         = iow(0xA0, 0x0B, std::mem::size_of:
 
 // Encoding helpers (linux asm-generic ioctl encoding: dir<<30 | size<<16 | type<<8 | nr)
 const fn _io(typ: u32, nr: u32) -> u32 { (0 << 30) | (0 << 16) | (typ << 8) | nr }
-// (public io/ior/iow/iowr defined above for submodules)
 
 // ===== C structs (must match kernel layout exactly) =====
 
@@ -188,8 +179,6 @@ pub struct drm_mode_crtc_page_flip {
 }
 
 // DRM_MODE_PAGE_FLIP_FLAGS
-const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
-const DRM_MODE_PAGE_FLIP_ASYNC: u32 = 0x02;
 #[allow(dead_code)]
 const DRM_MODE_PAGE_FLIP_TARGET: u32 = 0x04;
 
@@ -208,10 +197,7 @@ pub struct DrmBackend {
     pub fd: RawFd,
     pub width: u32,
     pub height: u32,
-    pub stride: u32,
-    pub connector_id: u32,
     pub crtc_id: u32,
-    pub mode: drm_mode_modeinfo,
     pub front: DumbBuffer,
     pub back: DumbBuffer,
     pub front_fb: u32,
@@ -220,8 +206,6 @@ pub struct DrmBackend {
 
 pub struct DumbBuffer {
     pub handle: u32,
-    pub width: u32,
-    pub height: u32,
     pub stride: u32,
     pub size: u64,
     pub mmap_addr: *mut u8,
@@ -359,10 +343,7 @@ impl DrmBackend {
         Ok(DrmBackend {
             fd,
             width, height,
-            stride: back.stride,
-            connector_id,
             crtc_id,
-            mode,
             front,
             back,
             front_fb,
@@ -562,8 +543,6 @@ pub fn create_dumb_buffer(fd: RawFd, w: u32, h: u32) -> Result<DumbBuffer> {
     unsafe { libc::memset(addr, 0, create.size as usize); }
     Ok(DumbBuffer {
         handle: create.handle,
-        width: w,
-        height: h,
         stride: create.pitch,
         size: create.size,
         mmap_addr: addr as *mut u8,

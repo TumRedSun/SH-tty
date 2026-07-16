@@ -12,8 +12,7 @@
 //!   - если workspace привязан к другому монитору — фокус переходит на этот монитор
 //!   - layout целевого workspace рендерится на целевом мониторе
 
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::Result;
 use std::os::unix::io::RawFd;
 
 use crate::config::MonitorCfg;
@@ -21,8 +20,6 @@ use super::kms::*;
 
 #[derive(Debug, Clone)]
 pub struct Monitor {
-    pub connector_name: String,
-    pub connector_id: u32,
     pub crtc_id: u32,
     pub width: u32,
     pub height: u32,
@@ -34,15 +31,10 @@ pub struct Monitor {
     pub front_mmap: *mut u8,
     pub back_mmap: *mut u8,
     pub mmap_size: u64,
-    /// Workspaces привязанные к этому монитору (из конфига).
-    pub workspaces: Vec<u8>,
-    /// Активный workspace на этом мониторе.
-    pub active_workspace: u8,
-    /// Позиция монитора в логической раскладке (для future).
-    pub position: MonitorPosition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // future use for multi-monitor layout
 pub enum MonitorPosition {
     Primary,
     LeftOf,
@@ -57,8 +49,6 @@ unsafe impl Sync for Monitor {}
 pub struct MultiMonitorBackend {
     pub fd: RawFd,
     pub monitors: Vec<Monitor>,
-    /// Map: workspace_id → index in monitors[].
-    pub workspace_to_monitor: HashMap<u8, usize>,
     /// Index of primary/active monitor (для keyboard focus).
     pub active_monitor: usize,
 }
@@ -76,7 +66,6 @@ impl MultiMonitorBackend {
             connectors.iter().filter(|c| c.connection == DRM_MODE_CONNECTED).count());
 
         let mut monitors = Vec::new();
-        let mut workspace_to_monitor = HashMap::new();
 
         // Для каждого подключённого коннектора — создаём dumb buffer + fb + modeset.
         for conn in &connectors {
@@ -123,24 +112,10 @@ impl MultiMonitorBackend {
             // Modeset.
             set_crtc(fd, crtc_id, back_fb, conn.connector_id, &mode)?;
 
-            // Workspaces из конфига (или все, если конфига нет).
-            let workspaces = cfg.map(|c| c.workspaces.clone()).unwrap_or_default();
-            let position = cfg.and_then(|c| c.position.as_ref()).map(|p| parse_position(p))
-                .unwrap_or(MonitorPosition::Primary);
-
-            let active_workspace = workspaces.first().copied().unwrap_or(1);
-
-            // Регистрируем workspace → monitor mapping.
-            for &ws in &workspaces {
-                workspace_to_monitor.insert(ws, monitors.len());
-            }
-
-            log::info!("monitor [{}]: {}x{} crtc={} ws={:?} active_ws={}",
-                connector_name, width, height, crtc_id, workspaces, active_workspace);
+            log::info!("monitor [{}]: {}x{} crtc={}",
+                connector_name, width, height, crtc_id);
 
             monitors.push(Monitor {
-                connector_name,
-                connector_id: conn.connector_id,
                 crtc_id,
                 width, height,
                 stride: back.stride,
@@ -151,9 +126,6 @@ impl MultiMonitorBackend {
                 front_mmap: front.mmap_addr,
                 back_mmap: back.mmap_addr,
                 mmap_size: back.size,
-                workspaces,
-                active_workspace,
-                position,
             });
         }
 
@@ -165,7 +137,6 @@ impl MultiMonitorBackend {
         Ok(MultiMonitorBackend {
             fd,
             monitors,
-            workspace_to_monitor,
             active_monitor: 0,
         })
     }
@@ -174,55 +145,10 @@ impl MultiMonitorBackend {
         &self.monitors[0]
     }
 
-    pub fn primary_monitor_mut(&mut self) -> &mut Monitor {
-        &mut self.monitors[0]
-    }
-
-    /// Возвращает индекс монитора для данного workspace.
-    pub fn monitor_for_workspace(&self, ws: u8) -> Option<usize> {
-        self.workspace_to_monitor.get(&ws).copied()
-    }
-
-    /// Переключает активный workspace на указанном мониторе.
-    pub fn set_monitor_workspace(&mut self, monitor_idx: usize, ws: u8) {
-        if monitor_idx < self.monitors.len() {
-            self.monitors[monitor_idx].active_workspace = ws;
-            self.active_monitor = monitor_idx;
-        }
-    }
-
-    /// Переключает на workspace N. Если workspace привязан к другому монитору —
-    /// активируем этот монитор.
-    pub fn switch_workspace(&mut self, ws: u8) -> Option<usize> {
-        if let Some(&mon_idx) = self.workspace_to_monitor.get(&ws) {
-            self.monitors[mon_idx].active_workspace = ws;
-            self.active_monitor = mon_idx;
-            Some(mon_idx)
-        } else {
-            // Если ws не привязан ни к одному монитору — переключаем на текущем.
-            if let Some(m) = self.monitors.get_mut(self.active_monitor) {
-                m.active_workspace = ws;
-            }
-            Some(self.active_monitor)
-        }
-    }
-
     /// Возвращает back buffer для активного монитора.
     pub fn active_back_buffer(&self) -> (*mut u8, u64, u32, u32, u32) {
         let m = &self.monitors[self.active_monitor];
         (m.back_mmap, m.mmap_size, m.stride, m.width, m.height)
-    }
-
-    /// Page-flip на активном мониторе.
-    pub fn flip_active(&mut self) -> Result<()> {
-        let m = &self.monitors[self.active_monitor];
-        page_flip(self.fd, m.crtc_id, m.back_fb)?;
-        // Swap front/back.
-        let m = &mut self.monitors[self.active_monitor];
-        std::mem::swap(&mut m.front_handle, &mut m.back_handle);
-        std::mem::swap(&mut m.front_fb, &mut m.back_fb);
-        std::mem::swap(&mut m.front_mmap, &mut m.back_mmap);
-        Ok(())
     }
 
     /// Page-flip на всех мониторах.
@@ -249,13 +175,4 @@ impl Drop for MultiMonitorBackend {
             libc::close(self.fd);
         }
     }
-}
-
-fn parse_position(s: &str) -> MonitorPosition {
-    if s == "primary" { MonitorPosition::Primary }
-    else if s.starts_with("left-of") { MonitorPosition::LeftOf }
-    else if s.starts_with("right-of") { MonitorPosition::RightOf }
-    else if s.starts_with("above") { MonitorPosition::Above }
-    else if s.starts_with("below") { MonitorPosition::Below }
-    else { MonitorPosition::Primary }
 }
