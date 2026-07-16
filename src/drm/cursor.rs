@@ -13,7 +13,7 @@
 //! Размер курсора: типично 64x64 (DRM_CAP_CURSOR_WIDTH/HEIGHT).
 //! Формат: DRM_FORMAT_ARGB8888.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::os::unix::io::RawFd;
 use crate::drm::kms::*;
 
@@ -131,6 +131,7 @@ impl HardwareCursor {
     }
 
     /// Скрывает курсор.
+    #[allow(dead_code)] // currently unused, kept for future hide-on-keyboard-input
     pub fn hide(&mut self) -> Result<()> {
         self.visible = false;
         let mut c = DrmModeCursor2::default();
@@ -167,6 +168,7 @@ impl HardwareCursor {
     }
 
     /// Обновляет изображение курсора (например, для анимации).
+    #[allow(dead_code)] // currently unused, kept for future cursor themes
     pub fn update_image(&mut self, pixels: &[u32]) -> Result<()> {
         if pixels.len() != (self.width * self.height) as usize {
             anyhow::bail!("cursor image size mismatch");
@@ -203,7 +205,7 @@ impl HardwareCursor {
             }
         }
         // Glow halo.
-        for r in 1..=3 {
+        for _r in 1..=3 {
             for i in -8..=8 {
                 for &(dx, dy) in &[(i, 0), (0, i)] {
                     let x = cx + dx;

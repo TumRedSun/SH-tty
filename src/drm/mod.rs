@@ -6,7 +6,7 @@ pub mod planes;
 
 pub use kms::DrmBackend;
 pub use fbdev::FbdevBackend;
-pub use multi_monitor::{MultiMonitorBackend, Monitor};
+pub use multi_monitor::MultiMonitorBackend;
 pub use cursor::HardwareCursor;
 pub use planes::OverlayManager;
 
@@ -41,15 +41,6 @@ impl Backend {
             Backend::Fbdev(f) => (f.width, f.height),
         }
     }
-
-    pub fn stride(&self) -> u32 {
-        match self {
-            Backend::Drm(d) => d.back.stride,
-            Backend::Fbdev(f) => f.stride,
-        }
-    }
-
-    pub fn bpp(&self) -> u32 { 32 }
 
     pub fn back_buffer(&mut self) -> &mut [u8] {
         match self {

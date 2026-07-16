@@ -10,7 +10,7 @@
 //!   4. Hardware cursor через DRM cursor plane (если поддерживается) —
 //!      иначе рисуем программно в canvas.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::os::unix::io::RawFd;
 
 #[repr(C)]
@@ -25,6 +25,7 @@ pub struct InputEvent {
 
 const EV_REL: u16 = 2;
 const EV_KEY: u16 = 1;
+#[allow(dead_code)] // EV_ABS not used for mouse (only relative motion)
 const EV_ABS: u16 = 3;
 
 const REL_X: u16 = 0;
@@ -157,6 +158,7 @@ impl Drop for Mouse {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Scroll/HScroll produced but not yet handled in WM loop
 pub enum MouseEvent {
     Move(i32, i32),
     LeftPress, LeftRelease,

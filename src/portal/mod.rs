@@ -12,7 +12,9 @@ use anyhow::{Context, Result};
 use zbus::{interface, Connection};
 
 pub struct PortalBackend {
+    #[allow(dead_code)] // stored for future DBus introspection
     pub service_name: String,
+    #[allow(dead_code)] // stored for future DBus introspection
     pub object_path: String,
 }
 

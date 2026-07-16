@@ -5,7 +5,7 @@
 //!
 //! Окна можно перемещать между workspaces через Mod4+Shift+N.
 
-use crate::layout::{Layout, LeafId, TileKind, Direction, FocusDir, Rect, Node};
+use crate::layout::{Layout, LeafId, Direction, Node};
 use std::collections::HashMap;
 
 pub struct Workspaces {
@@ -17,13 +17,6 @@ pub struct Workspaces {
     /// дерева и кладём в дерево целевого workspace.
     pub names: HashMap<u8, String>,
     pub max: u8,
-}
-
-#[derive(Debug, Clone)]
-pub struct TileMeta {
-    pub kind: TileKind,
-    pub title: String,
-    pub workspace: u8,
 }
 
 impl Workspaces {

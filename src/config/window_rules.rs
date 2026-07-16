@@ -28,6 +28,7 @@ pub struct WindowInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // monitor/size/position parsed for future window placement
 pub struct Placement {
     pub workspace: Option<u8>,
     pub monitor: Option<String>,
@@ -156,10 +157,12 @@ impl PlacementCache {
         self.placed.insert(xid, placement);
     }
 
+    #[allow(dead_code)] // utility, not currently called
     pub fn is_placed(&self, xid: u32) -> bool {
         self.placed.contains_key(&xid)
     }
 
+    #[allow(dead_code)] // utility, not currently called
     pub fn unplace(&mut self, xid: u32) {
         self.placed.remove(&xid);
     }

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 

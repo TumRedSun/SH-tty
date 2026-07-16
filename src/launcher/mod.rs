@@ -17,6 +17,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // icon parsed from .desktop but not rendered (no icon theme support yet)
 pub struct Entry {
     pub name: String,
     pub exec: String,

@@ -108,6 +108,7 @@ impl CharSnapshot {
     }
 
     /// Заполняет snapshot рандомными символами из набора glitch.
+    #[allow(dead_code)] // used in animations but marked dead by analyzer
     pub fn fill_random(&mut self, cfg: &AnimationsCfg) {
         let mut state = 0xDEADBEEFu64;
         for c in self.cells.iter_mut() {
@@ -198,6 +199,7 @@ impl ActiveAnimation {
     }
 
     /// Прогресс 0.0..1.0 внутри всей анимации.
+    #[allow(dead_code)] // utility, not currently called
     pub fn progress(&self) -> f32 {
         let e = self.started.elapsed().as_secs_f32();
         let t = self.total_duration.as_secs_f32();
@@ -228,6 +230,7 @@ impl ActiveAnimation {
 
     /// Перебираем ли сейчас символы в ячейке (col, row)?
     /// Для corner-to-corner reveal: ячейка в "diagonal distance" от TL > reveal_progress.
+    #[allow(dead_code)] // utility for fine-grained cell queries
     pub fn cell_is_glitching(&self, col: u32, row: u32, cols: u32, rows: u32, cfg: &AnimationsCfg) -> bool {
         let rp = self.reveal_progress(cfg);
         if rp >= 1.0 { return false; }
@@ -328,10 +331,12 @@ impl AnimationManager {
         self.active.retain(|a| !a.is_finished());
     }
 
+    #[allow(dead_code)] // utility, not currently called
     pub fn is_animating(&self) -> bool {
         !self.active.is_empty()
     }
 
+    #[allow(dead_code)] // utility, not currently called
     pub fn is_in_ws_transition(&self) -> bool {
         self.active.iter().any(|a| a.kind == AnimationKind::WorkspaceTransition)
     }
@@ -371,7 +376,7 @@ impl AnimationManager {
 fn render_ws_transition(
     _canvas: &Canvas,
     text: &TextRenderer,
-    font: &Font,
+    _font: &Font,
     anim: &ActiveAnimation,
     cfg: &AnimationsCfg,
     glitch_col: Color,
@@ -379,7 +384,7 @@ fn render_ws_transition(
     let elapsed = anim.elapsed_ms();
     let phase1_end = cfg.ws_transition_ms as u64;
     let phase2_end = phase1_end + cfg.ws_manifest_ms as u64;
-    let phase3_end = phase2_end + cfg.ws_reveal_ms as u64;
+    let _phase3_end = phase2_end + cfg.ws_reveal_ms as u64;
 
     // Базовые параметры сетки из new_snapshot.
     let new_snap = match &anim.new_snapshot {
@@ -563,7 +568,7 @@ fn render_random_glitch(
 pub fn snapshot_workspace(
     workspaces: &crate::layout::workspaces::Workspaces,
     terminals: &std::collections::HashMap<crate::layout::LeafId, crate::TerminalTile>,
-    x11: &Option<crate::x11::X11Compositor>,
+    _x11: &Option<crate::x11::X11Compositor>,
     canvas: &Canvas,
     font: &Font,
     theme: &crate::ui::Theme,

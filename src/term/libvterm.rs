@@ -79,7 +79,6 @@ struct LibVTerm {
     _lib: Library,
     vterm_new: unsafe extern "C" fn(rows: c_int, cols: c_int) -> *mut c_void,
     vterm_free: unsafe extern "C" fn(vt: *mut c_void),
-    vterm_set_size: unsafe extern "C" fn(vt: *mut c_void, rows: c_int, cols: c_int),
     vterm_input_write: unsafe extern "C" fn(vt: *mut c_void, buf: *const c_char, len: usize) -> usize,
     vterm_obtain_screen: unsafe extern "C" fn(vt: *mut c_void) -> *mut c_void,
     vterm_screen_reset: unsafe extern "C" fn(screen: *mut c_void, hard: c_int),
@@ -107,8 +106,6 @@ fn load_libvterm() -> Option<&'static LibVTerm> {
                 *lib.get(b"vterm_new\0").ok()?;
             let vterm_free: unsafe extern "C" fn(*mut c_void) =
                 *lib.get(b"vterm_free\0").ok()?;
-            let vterm_set_size: unsafe extern "C" fn(*mut c_void, c_int, c_int) =
-                *lib.get(b"vterm_set_size\0").ok()?;
             let vterm_input_write: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> usize =
                 *lib.get(b"vterm_input_write\0").ok()?;
             let vterm_obtain_screen: unsafe extern "C" fn(*mut c_void) -> *mut c_void =
@@ -123,7 +120,6 @@ fn load_libvterm() -> Option<&'static LibVTerm> {
                 _lib: lib,
                 vterm_new,
                 vterm_free,
-                vterm_set_size,
                 vterm_input_write,
                 vterm_obtain_screen,
                 vterm_screen_reset,
@@ -143,8 +139,6 @@ pub fn available() -> bool {
 pub struct LibVTermHandle {
     vt: *mut c_void,
     screen: *mut c_void,
-    pub cols: u16,
-    pub rows: u16,
 }
 
 unsafe impl Send for LibVTermHandle {}
@@ -162,17 +156,7 @@ impl LibVTermHandle {
                 return None;
             }
             (lib.vterm_screen_reset)(screen, 1);
-            Some(LibVTermHandle { vt, screen, cols, rows })
-        }
-    }
-
-    pub fn resize(&mut self, cols: u16, rows: u16) {
-        let lib = match load_libvterm() { Some(l) => l, None => return };
-        self.cols = cols;
-        self.rows = rows;
-        unsafe {
-            (lib.vterm_set_size)(self.vt, rows as c_int, cols as c_int);
-            (lib.vterm_screen_reset)(self.screen, 1);
+            Some(LibVTermHandle { vt, screen })
         }
     }
 

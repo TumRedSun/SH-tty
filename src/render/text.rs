@@ -44,6 +44,7 @@ impl<'a> TextRenderer<'a> {
     }
 
     /// Рисует текст в прямоугольнике с переносом по словам (упрощённо).
+    #[allow(dead_code)] // not currently used, kept for future popup rendering
     pub fn draw_text_wrapped(&self, x: i32, y: i32, max_w: u32, text: &str, fg: Color) {
         let fw = self.font.width as i32;
         let fh = self.font.height as i32;

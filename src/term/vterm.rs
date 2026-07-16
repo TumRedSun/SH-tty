@@ -103,8 +103,6 @@ pub struct VTerm {
     pub title: String,
     /// libvterm backend (если доступен).
     libvterm: Option<crate::term::libvterm::LibVTermHandle>,
-    /// Используется для keep-alive при failed load — не пытаемся грузить повторно.
-    libvterm_unavailable: bool,
 }
 
 impl VTerm {
@@ -112,7 +110,6 @@ impl VTerm {
         let cells = (cols as usize) * (rows as usize);
         // Пытаемся загрузить libvterm.
         let libvterm = crate::term::libvterm::LibVTermHandle::new(cols, rows);
-        let libvterm_unavailable = libvterm.is_none();
         if libvterm.is_some() {
             log::info!("libvterm backend active (full xterm compatibility)");
         } else {
@@ -139,14 +136,17 @@ impl VTerm {
             dirty_bottom: rows.saturating_sub(1),
             title: String::new(),
             libvterm,
-            libvterm_unavailable,
         }
     }
 
+    /// Resize terminal grid. Currently unused but kept for future
+    /// window-resize support.
+    ///
+    /// NOTE: libvterm resize не реализован — мы не загружаем vterm_set_size
+    /// символ (см. libvterm.rs). Если потребуется resize, нужно добавить
+    /// vterm_set_size обратно в LibVTerm struct и loader.
+    #[allow(dead_code)]
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        if let Some(lv) = self.libvterm.as_mut() {
-            lv.resize(cols, rows);
-        }
         let new_cells = (cols as usize) * (rows as usize);
         let mut new_grid = vec![Cell::blank(); new_cells];
         let mut new_alt = vec![Cell::blank(); new_cells];
@@ -169,6 +169,7 @@ impl VTerm {
         self.mark_dirty(0, rows.saturating_sub(1));
     }
 
+    #[allow(dead_code)]
     pub fn cell(&self, x: u16, y: u16) -> &Cell {
         let idx = (y as usize) * (self.cols as usize) + (x as usize);
         &self.grid[idx]
@@ -183,11 +184,13 @@ impl VTerm {
         if bottom > self.dirty_bottom { self.dirty_bottom = bottom; }
     }
 
+    #[allow(dead_code)]
     pub fn clear_dirty(&mut self) {
         self.dirty_top = self.rows;
         self.dirty_bottom = 0;
     }
 
+    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool { self.dirty_top <= self.dirty_bottom }
 
     /// Главный обработчик потока байтов от PTY.
@@ -376,6 +379,7 @@ impl VTerm {
         response
     }
 
+    #[allow(dead_code)]
     fn grid_slice_mut(&mut self) -> &mut [Cell] {
         if self.on_alt { &mut self.alt_grid } else { &mut self.grid }
     }
@@ -647,7 +651,6 @@ impl VTerm {
             }
             _ => {}
         }
-        drop(grid);
         self.mark_dirty(0, self.rows.saturating_sub(1));
     }
 
@@ -669,7 +672,6 @@ impl VTerm {
             }
             _ => {}
         }
-        drop(grid);
         self.mark_dirty(cy as u16, cy as u16);
     }
 
@@ -684,7 +686,6 @@ impl VTerm {
             let src = c + n;
             grid[cy * cols + c] = if src < cols { grid[cy * cols + src] } else { blank };
         }
-        drop(grid);
         self.mark_dirty(cy as u16, cy as u16);
     }
 
@@ -701,7 +702,6 @@ impl VTerm {
         for c in cx..(cx + n).min(cols) {
             grid[cy * cols + c] = blank;
         }
-        drop(grid);
         self.mark_dirty(cy as u16, cy as u16);
     }
 

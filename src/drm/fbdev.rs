@@ -9,13 +9,12 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 
 pub struct FbdevBackend {
-    pub file: std::fs::File,
+    /// Hold the file to keep the fd alive (mmap depends on it).
+    _file: std::fs::File,
     pub mmap_addr: *mut u8,
     pub size: usize,
     pub width: u32,
     pub height: u32,
-    pub stride: u32,
-    pub bpp: u32,
 }
 
 unsafe impl Send for FbdevBackend {}
@@ -45,7 +44,7 @@ impl FbdevBackend {
             result as *mut u8
         };
         log::info!("fbdev initialized: {}x{} ({}bpp, stride {})", width, height, bpp, stride);
-        Ok(FbdevBackend { file, mmap_addr: addr, size, width, height, stride, bpp })
+        Ok(FbdevBackend { _file: file, mmap_addr: addr, size, width, height })
     }
 
     pub fn buffer_slice(&self) -> &mut [u8] {
@@ -66,13 +65,9 @@ impl Drop for FbdevBackend {
     }
 }
 
-/// Читает fb_fix_screeninfo + fb_var_screeninfo через ioctl.
-fn read_fb_info(file: &std::fs::File) -> Result<(u32, u32, u32, u32, usize)> {
-    // fb_fix_screeninfo: ioctl 0x4602
-    // fb_var_screeninfo: ioctl 0x4601
-    //
-    // Сложно делать через raw ioctl в Rust без структур. Поэтому читаем из
-    // /sys/class/graphics/fb0/{virtual_size,stride,bits_per_pixel}.
+/// Читает fb_fix_screeninfo + fb_var_screeninfo через sysfs.
+/// Возвращает (width, height, stride, bpp, mmap_size).
+fn read_fb_info(_file: &std::fs::File) -> Result<(u32, u32, u32, u32, usize)> {
     let p = std::path::Path::new("/sys/class/graphics/fb0");
     let virt_size = std::fs::read_to_string(p.join("virtual_size"))
         .unwrap_or_else(|_| "1920,1080".to_string());

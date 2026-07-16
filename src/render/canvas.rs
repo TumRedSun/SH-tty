@@ -27,6 +27,7 @@ impl Canvas {
     }
 
     /// Заменяет backing-store (используется после реконфигурации KMS).
+    #[allow(dead_code)] // currently unused, kept for future mode-switching
     pub fn reallocate(&mut self, width: u32, height: u32, fmt: PixelFmt) {
         let bpp = fmt.bytes_per_pixel() as u32;
         let stride = width * bpp;
