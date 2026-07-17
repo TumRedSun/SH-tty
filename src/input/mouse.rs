@@ -1,14 +1,8 @@
 //! Мышь через evdev (/dev/input/event*).
 //!
-//! Стратегия:
-//!   1. Находим mouse device в /dev/input/by-path/ или /dev/input/event*.
-//!   2. Читаем REL_X/REL_Y/BTN_LEFT/BTN_RIGHT/BTN_MIDDLE.
-//!   3. Поддерживаем виртуальный курсор:
-//!      - Если активный tile — X11: отправляем события через XTest extension
-//!        в наш Xephyr display.
-//!      - Иначе: обновляем позицию курсора, клики по tile-ам переключают фокус.
-//!   4. Hardware cursor через DRM cursor plane (если поддерживается) —
-//!      иначе рисуем программно в canvas.
+//! Device detection: перебираем /dev/input/event* и проверяем через
+//! EVIOCGBIT что устройство поддерживает EV_REL (relative motion) и
+//! имеет BTN_LEFT. Это отсекает клавиатуры, joystick'и, touchscreens.
 
 use anyhow::Result;
 use std::os::unix::io::RawFd;
@@ -25,7 +19,7 @@ pub struct InputEvent {
 
 const EV_REL: u16 = 2;
 const EV_KEY: u16 = 1;
-#[allow(dead_code)] // EV_ABS not used for mouse (only relative motion)
+#[allow(dead_code)]
 const EV_ABS: u16 = 3;
 
 const REL_X: u16 = 0;
@@ -36,6 +30,11 @@ const REL_HWHEEL: u16 = 6;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
+
+// ioctl: EVIOCGBIT(ev, len) = _IOR('E', 0x20 + ev, u8[len])
+const fn eviocgbit(ev: u32, len: u32) -> libc::c_ulong {
+    ((2u32 << 30) | (len << 16) | (0x45 << 8) | (0x20 + ev)) as libc::c_ulong
+}
 
 pub struct Mouse {
     pub fd: RawFd,
@@ -50,33 +49,56 @@ pub struct Mouse {
 
 impl Mouse {
     pub fn open(screen_w: u32, screen_h: u32) -> Result<Self> {
-        let candidates = [
+        // Сначала пробуем by-path symlinks.
+        let by_path_patterns = [
             "/dev/input/by-path/platform-i8042-serio-1-event-mouse",
-            "/dev/input/by-path/pci0000:00-event-mouse",
-            "/dev/input/mice",
-            "/dev/input/event4",
-            "/dev/input/event5",
-            "/dev/input/event6",
-            "/dev/input/event7",
-            "/dev/input/event8",
-            "/dev/input/event9",
-            "/dev/input/event10",
+            "/dev/input/by-path/*-event-mouse",
         ];
-        for path in &candidates {
-            if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
-                use std::os::unix::io::IntoRawFd;
-                let fd = file.into_raw_fd();
-                log::info!("mouse opened: {}", path);
-                return Ok(Mouse {
-                    fd,
-                    x: (screen_w / 2) as i32,
-                    y: (screen_h / 2) as i32,
-                    left: false, right: false, middle: false,
-                    screen_w, screen_h,
-                });
+        for pattern in &by_path_patterns {
+            if let Ok(entries) = glob::glob(pattern) {
+                for entry in entries.flatten() {
+                    if let Some(path_str) = entry.to_str() {
+                        if let Ok(fd) = open_device_rw(path_str) {
+                            if is_mouse(fd) {
+                                log::info!("mouse opened (by-path): {}", entry.display());
+                                return Ok(Mouse::new(fd, screen_w, screen_h));
+                            }
+                            unsafe { libc::close(fd); }
+                        }
+                    }
+                }
             }
         }
+
+        // Fallback: перебираем /dev/input/event* с EVIOCGBIT проверкой.
+        for n in 0..=63u32 {
+            let path = format!("/dev/input/event{}", n);
+            if let Ok(fd) = open_device_rw(&path) {
+                if is_mouse(fd) {
+                    log::info!("mouse opened (event{}): {}", n, path);
+                    return Ok(Mouse::new(fd, screen_w, screen_h));
+                }
+                unsafe { libc::close(fd); }
+            }
+        }
+
+        // Last resort: legacy /dev/input/mice (shared PS/2 mouse device).
+        if let Ok(fd) = open_device_rw("/dev/input/mice") {
+            log::info!("mouse opened (legacy /dev/input/mice)");
+            return Ok(Mouse::new(fd, screen_w, screen_h));
+        }
+
         anyhow::bail!("no mouse device found in /dev/input/")
+    }
+
+    fn new(fd: RawFd, screen_w: u32, screen_h: u32) -> Self {
+        Mouse {
+            fd,
+            x: (screen_w / 2) as i32,
+            y: (screen_h / 2) as i32,
+            left: false, right: false, middle: false,
+            screen_w, screen_h,
+        }
     }
 
     /// Обрабатывает события evdev. Возвращает список MouseEvents для WM.
@@ -131,17 +153,12 @@ impl Mouse {
 
     /// Рисует курсор на canvas (софтверный курсор, fallback если нет DRM cursor plane).
     pub fn render_cursor(&self, canvas: &crate::render::canvas::Canvas, theme: &crate::ui::theme::Theme) {
-        // Простой неоновый курсор-крестик в MCD-стиле.
         use crate::ui::theme::Color;
         let x = self.x;
         let y = self.y;
-        // Горизонтальная линия.
         canvas.fill_rect(x - 8, y - 1, 17, 2, theme.accent_magenta);
-        // Вертикальная линия.
         canvas.fill_rect(x - 1, y - 8, 2, 17, theme.accent_magenta);
-        // Точка в центре.
         canvas.fill_rect(x - 1, y - 1, 2, 2, Color(0xFF, 0xFF, 0xFF));
-        // Glow.
         for i in 1..=2 {
             let alpha = (30 / i) as u8;
             let _ = alpha;
@@ -166,4 +183,44 @@ pub enum MouseEvent {
     MiddlePress, MiddleRelease,
     Scroll(i32),
     HScroll(i32),
+}
+
+/// Открывает устройство на чтение/запись.
+fn open_device_rw(path: &str) -> std::io::Result<RawFd> {
+    let c_path = std::ffi::CString::new(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+/// Проверяет, является ли устройство мышью через EVIOCGBIT.
+///
+/// Устройство считается мышью если:
+/// 1. Поддерживает EV_REL (relative motion)
+/// 2. Поддерживает EV_KEY с BTN_LEFT
+/// Это отсекает клавиатуры, touchscreens (EV_ABS), joystick'и.
+fn is_mouse(fd: RawFd) -> bool {
+    let mut ev_bits = [0u8; 4];
+    let ret = unsafe {
+        libc::ioctl(fd, eviocgbit(0 /* EV_SYN */, ev_bits.len() as u32), ev_bits.as_mut_ptr())
+    };
+    if ret < 0 { return false; }
+    let has_rel = (ev_bits[0] & (1 << EV_REL)) != 0;
+    let has_key = (ev_bits[0] & (1 << EV_KEY)) != 0;
+    if !has_rel || !has_key { return false; }
+
+    let mut key_bits = [0u8; 96];
+    let ret = unsafe {
+        libc::ioctl(fd, eviocgbit(EV_KEY as u32, key_bits.len() as u32), key_bits.as_mut_ptr())
+    };
+    if ret < 0 { return false; }
+
+    // BTN_LEFT = 0x110 = 272. byte 34, bit 0.
+    let byte_idx = (BTN_LEFT / 8) as usize;
+    let bit_idx = (BTN_LEFT % 8) as u8;
+    if byte_idx >= key_bits.len() { return false; }
+    (key_bits[byte_idx] >> bit_idx) & 1 == 1
 }

@@ -9,6 +9,12 @@ After=systemd-user-sessions.service plymouth-quit.service
 # Disable default agetty — superhot-tty имеет собственный login screen.
 Conflicts=getty@%i.service
 
+# Crash loop protection: если сервис упал 5 раз за 60 секунд,
+# systemd перестанет перезапускать. Дополнительно WM сам откатывается
+# на getty при обнаружении crash loop (см. check_crash_loop в main.rs).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=idle
 ExecStart=/usr/local/bin/superhot-tty
