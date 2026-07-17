@@ -22,6 +22,8 @@ Restart=always
 RestartSec=2
 
 StandardInput=tty
+StandardOutput=journal
+StandardError=journal
 TTYPath=/dev/%I
 TTYReset=yes
 TTYVHangup=yes
@@ -33,9 +35,12 @@ TTYVTDisallocate=yes
 #   3. fork() — ребёнок drop к "superhot-tty" (login screen)
 #      родитель остаётся root для PAM auth, затем drop к вошедшему пользователю
 # После успешного входа процесс работает от имени пользователя.
+#
+# ВАЖНО: НЕ используем PAMName=login — systemd пытается создать login session
+# через pam_systemd (Varlink), что ломает запуск (InvalidParameter error).
+# WM сам делает PAM auth через FFI к libpam в privilege-separated child.
 User=root
-WorkingDirectory=/root
-PAMName=login
+WorkingDirectory=/
 
 # Hardening (совместимо с DRM master requirements).
 ProtectSystem=full

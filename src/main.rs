@@ -134,7 +134,9 @@ fn main() -> Result<()> {
     }
 
     // === PHASE 1: as root, open privileged resources ===
+    log::info!("loading config...");
     let cfg_system = Config::load();
+    log::info!("config loaded, initializing DRM backend...");
     let mut multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -144,10 +146,12 @@ fn main() -> Result<()> {
     };
 
     let mut single_backend = if multi_backend.is_none() {
+        log::info!("opening single DRM backend...");
         Some(Backend::open(None, None).context("failed to open graphics backend")?)
     } else {
         None
     };
+    log::info!("DRM backend ready");
 
     let (canvas_w, canvas_h) = if let Some(mb) = &multi_backend {
         let m = mb.primary_monitor();
@@ -159,12 +163,18 @@ fn main() -> Result<()> {
     };
 
     let fmt = PixelFmt::Xrgb8888;
+    log::info!("canvas: {}x{} fmt={:?}", canvas_w, canvas_h, fmt);
     let canvas = Canvas::new(canvas_w, canvas_h, fmt);
+    log::info!("loading font...");
     let font = Font::load_default();
+    log::info!("font: {}x{}", font.width, font.height);
     let theme = build_theme(&cfg_system);
+    log::info!("opening keyboard...");
     let mut keyboard = Keyboard::open().context("opening keyboard")?;
+    log::info!("keyboard ready");
 
     // === PHASE 2: fork for privilege separation ===
+    log::info!("forking for privilege separation...");
     let (mut parent_sock, mut child_sock) =
         std::os::unix::net::UnixStream::pair()
             .context("failed to create socketpair for privsep")?;

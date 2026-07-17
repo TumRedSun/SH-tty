@@ -146,6 +146,9 @@ EOF
 
 # Включаем наш unit.
 echo_blue "==> Enabling superhot-tty@tty1..."
+# Очищаем crash state file — если были предыдущие падения, не хотим
+# сразу попасть в crash loop detection при первом запуске после install.
+rm -f /run/superhot-tty-crashes
 systemctl daemon-reload
 systemctl enable superhot-tty@tty1.service
 

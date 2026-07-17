@@ -20,12 +20,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="${SCRIPT_DIR}/target/packages"
 mkdir -p "${PKG_DIR}"
 
-VERSION="0.3.0"
+# Версия из Cargo.toml (автоматически, не hardcoded).
+VERSION=$(grep '^version' "${SCRIPT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+PKGNAME="superhot-tty"
 
-echo_red()    { echo -e "\e[31m$*\e[0m"; }
+echo_blue()   { echo -e "\e[34m$*\e[0m"; }
 echo_green()  { echo -e "\e[32m$*\e[0m"; }
 echo_yellow() { echo -e "\e[33m$*\e[0m"; }
-echo_blue()   { echo -e "\e[34m$*\e[0m"; }
+echo_red()    { echo -e "\e[31m$*\e[0m"; }
 
 # 1. Сначала собираем release-бинарник.
 echo_blue "==> Building release binary..."

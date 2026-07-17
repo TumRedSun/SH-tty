@@ -1,6 +1,6 @@
 # Maintainer: SuperHot TTY contributors
 pkgname=superhot-tty
-pkgver=0.3.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="SuperHot MCD-styled TTY window manager with X11 tile embedding, multi-monitor, login screen"
 arch=('x86_64' 'aarch64')
@@ -10,26 +10,26 @@ depends=(
     'systemd'
     'kbd'
     'zsh'
-    'xorg-server-xephyr'
-    'pipewire'
-    'pipewire-pulse'
-    'wireplumber'
-    'xdg-desktop-portal'
     'pam'
 )
 optdepends=(
+    'xorg-server-xephyr: X11 tile embedding'
+    'pipewire: audio support'
+    'pipewire-pulse: PulseAudio compatibility'
+    'wireplumber: PipeWire session manager'
+    'xdg-desktop-portal: screen share support'
     'sdl2: gamepad button mapping (build with --features gamepad-sdl2)'
-    'xdg-desktop-portal-gtk: GTK file chooser portal'
-    'libvterm: full xterm compatibility (future)'
+    'libvterm: full xterm compatibility'
 )
 makedepends=('rust' 'cargo' 'gcc' 'pkgconf')
+# source заполняется build-packages.sh через sed (локальный tarball).
+# При ручном запуске makepkg — скачивает с GitHub.
 source=("$pkgname-$pkgver.tar.gz::https://github.com/TumRedSun/SH-tty/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 install=superhot-tty.install
 
 build() {
-    cd "$srcdir/SH-tty-$pkgver"
-    # Если установлен sdl2 — собираем с gamepad-sdl2.
+    cd "$srcdir"/SH-tty-$pkgver 2>/dev/null || cd "$srcdir"/superhot-tty 2>/dev/null || cd "$srcdir"
     if pkg-config --exists sdl2 2>/dev/null; then
         cargo build --release --features gamepad-sdl2
     else
@@ -38,21 +38,12 @@ build() {
 }
 
 package() {
-    cd "$srcdir/SH-tty-$pkgver"
+    cd "$srcdir"/SH-tty-$pkgver 2>/dev/null || cd "$srcdir"/superhot-tty 2>/dev/null || cd "$srcdir"
 
-    # Binary.
     install -Dm755 target/release/superhot-tty "$pkgdir/usr/local/bin/superhot-tty"
-
-    # Systemd unit.
     install -Dm644 systemd/superhot-tty@.service "$pkgdir/etc/systemd/system/superhot-tty@.service"
-
-    # Default config.
     install -Dm644 config/default.toml "$pkgdir/etc/SH-tty/config.toml"
-
-    # Example zshrc.
     install -Dm644 skel/zshrc.example "$pkgdir/usr/share/SH-tty/skel/zshrc.example"
-
-    # README + LICENSE.
     install -Dm644 README.md "$pkgdir/usr/share/doc/SH-tty/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/SH-tty/LICENSE"
 }
