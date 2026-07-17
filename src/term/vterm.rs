@@ -139,13 +139,8 @@ impl VTerm {
         }
     }
 
-    /// Resize terminal grid. Currently unused but kept for future
-    /// window-resize support.
-    ///
-    /// NOTE: libvterm resize не реализован — мы не загружаем vterm_set_size
-    /// символ (см. libvterm.rs). Если потребуется resize, нужно добавить
-    /// vterm_set_size обратно в LibVTerm struct и loader.
-    #[allow(dead_code)]
+    /// Resize terminal grid. Copies existing cells into new grid (truncated
+    /// if smaller, padded with blanks if larger). Updates scroll region.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let new_cells = (cols as usize) * (rows as usize);
         let mut new_grid = vec![Cell::blank(); new_cells];

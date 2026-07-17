@@ -49,8 +49,6 @@ unsafe impl Sync for Monitor {}
 pub struct MultiMonitorBackend {
     pub fd: RawFd,
     pub monitors: Vec<Monitor>,
-    /// Index of primary/active monitor (для keyboard focus).
-    pub active_monitor: usize,
 }
 
 impl MultiMonitorBackend {
@@ -137,18 +135,11 @@ impl MultiMonitorBackend {
         Ok(MultiMonitorBackend {
             fd,
             monitors,
-            active_monitor: 0,
         })
     }
 
     pub fn primary_monitor(&self) -> &Monitor {
         &self.monitors[0]
-    }
-
-    /// Возвращает back buffer для активного монитора.
-    pub fn active_back_buffer(&self) -> (*mut u8, u64, u32, u32, u32) {
-        let m = &self.monitors[self.active_monitor];
-        (m.back_mmap, m.mmap_size, m.stride, m.width, m.height)
     }
 
     /// Page-flip на всех мониторах.
