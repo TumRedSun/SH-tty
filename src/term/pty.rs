@@ -118,7 +118,6 @@ impl Pty {
 
     /// Resize PTY window. Sends TIOCSWINSZ to the slave so the child
     /// process receives SIGWINCH and updates its terminal dimensions.
-    #[allow(dead_code)] // currently unused, kept for future resize support
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         const TIOCSWINSZ: libc::c_ulong = 0x5414;

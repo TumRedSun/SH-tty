@@ -498,8 +498,7 @@ fn run_wm(
     let mut terminals: HashMap<LeafId, TerminalTile> = HashMap::new();
     // Создаём первый терминал на активном workspace.
     let first_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
-    let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
-    let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
+    let (cols, rows) = calc_terminal_size(&canvas, &font, &cfg);
     if let Ok(pty) = Pty::spawn(cols, rows, Some(&cfg.general.shell)) {
         set_nonblocking(pty.master_fd);
         terminals.insert(first_id, TerminalTile {
@@ -688,11 +687,12 @@ fn run_wm(
                             } else if is_terminal {
                                 // Терминальное приложение — создаём нативный терминал.
                                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
-                                if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&current_cfg.general.shell)) {
+                                let (tc, tr) = calc_terminal_size(&canvas, &font, &current_cfg);
+                                if let Ok(pty) = Pty::spawn(tc, tr, Some(&current_cfg.general.shell)) {
                                     set_nonblocking(pty.master_fd);
                                     terminals.insert(new_id, TerminalTile {
                                         pty,
-                                        vterm: VTerm::new(cols.min(200), rows.min(80)),
+                                        vterm: VTerm::new(tc, tr),
                                         title: entry_name,
                                         workspace: workspaces.current,
                                     });
@@ -795,6 +795,36 @@ fn run_wm(
                 for ev in &events {
                     if let input::MouseEvent::Move(x, y) = ev {
                         let _ = hc.move_to(*x, *y);
+                    }
+                }
+            }
+        }
+
+        // 3.5. Resize terminals to fit their tiles.
+        // Layout может измениться (split, move, fullscreen, focus) — пересчитываем
+        // размер каждого терминала по его tile rect и шлём TIOCSWINSZ в PTY.
+        // Без этого shell не знает что размер изменился → vim/htop/tmux рисуют криво.
+        {
+            let screen_rect = Rect { x: 0, y: 0, w: canvas.width, h: canvas.height };
+            let tile_rects = workspaces.current_layout().tile_rects(screen_rect);
+            let fw = font.width as i32;
+            let fh = font.height as i32;
+            let padding = current_cfg.general.outer_padding.max(0) as i32;
+            let status_h = current_cfg.general.status_bar_height as i32;
+            for (leaf_id, _kind, rect) in &tile_rects {
+                if let Some(tile) = terminals.get_mut(leaf_id) {
+                    if tile.workspace != workspaces.current { continue; }
+                    // Считаем cols/rows для этого конкретного tile.
+                    let avail_w = (rect.w as i32 - padding * 2).max(fw);
+                    let avail_h = (rect.h as i32 - padding * 2 - status_h).max(fh);
+                    if fw == 0 || fh == 0 { continue; }
+                    let new_cols = ((avail_w / fw).max(1) as u16).min(500);
+                    let new_rows = ((avail_h / fh).max(1) as u16).min(200);
+                    if new_cols != tile.vterm.cols || new_rows != tile.vterm.rows {
+                        tile.vterm.resize(new_cols, new_rows);
+                        if let Err(e) = tile.pty.resize(new_cols, new_rows) {
+                            log::debug!("pty resize for tile {:?}: {}", leaf_id, e);
+                        }
                     }
                 }
             }
@@ -1047,6 +1077,30 @@ fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Рассчитывает размер терминала (cols × rows) для canvas с учётом конфига.
+///
+/// Использует cfg.general.outer_padding вместо hardcoded 8, и
+/// cfg.general.status_bar_height вместо hardcoded font.height*2.
+/// Не накладывает произвольных лимитов на cols/rows — терминал будет
+/// занимать весь доступный размер tile, независимо от разрешения.
+///
+/// Для маленьких экранов (VGA 640×480) возвращает минимум 1×1.
+fn calc_terminal_size(canvas: &Canvas, font: &Font, cfg: &Config) -> (u16, u16) {
+    let padding = cfg.general.outer_padding.max(0) as i32;
+    let status_h = cfg.general.status_bar_height as i32;
+    let fw = font.width as i32;
+    let fh = font.height as i32;
+    // Защита от деления на 0 — font width/height всегда > 0, но defensive.
+    if fw == 0 || fh == 0 {
+        return (1, 1);
+    }
+    let avail_w = (canvas.width as i32 - padding * 2).max(fw);
+    let avail_h = (canvas.height as i32 - padding * 2 - status_h).max(fh);
+    let cols = (avail_w / fw).max(1) as u16;
+    let rows = (avail_h / fh).max(1) as u16;
+    (cols, rows)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_hotkey(
     key: Key,
@@ -1143,13 +1197,12 @@ fn execute_action(
                 None => cfg.general.shell.clone(),
             };
             let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
-            let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
-            let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
-            if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
+            let (tc, tr) = calc_terminal_size(canvas, font, cfg);
+            if let Ok(pty) = Pty::spawn(tc, tr, Some(&cfg.general.shell)) {
                 set_nonblocking(pty.master_fd);
                 terminals.insert(new_id, TerminalTile {
                     pty,
-                    vterm: VTerm::new(cols.min(200), rows.min(80)),
+                    vterm: VTerm::new(tc, tr),
                     title: full,
                     workspace: workspaces.current,
                 });
@@ -1231,14 +1284,13 @@ fn spawn_term(
     font: &Font,
     cfg: &Config,
 ) {
-    let cols = ((canvas.width as i32 - 8) / font.width as i32).max(1) as u16;
-    let rows = ((canvas.height as i32 - 8 - font.height as i32 * 2) / font.height as i32).max(1) as u16;
+    let (cols, rows) = calc_terminal_size(canvas, font, cfg);
     let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, dir);
-    if let Ok(pty) = Pty::spawn(cols.min(200), rows.min(80), Some(&cfg.general.shell)) {
+    if let Ok(pty) = Pty::spawn(cols, rows, Some(&cfg.general.shell)) {
         set_nonblocking(pty.master_fd);
         terminals.insert(new_id, TerminalTile {
             pty,
-            vterm: VTerm::new(cols.min(200), rows.min(80)),
+            vterm: VTerm::new(cols, rows),
             title: cfg.general.shell.clone(),
             workspace: workspaces.current,
         });
@@ -1522,21 +1574,58 @@ fn get_xcb_connection(display: &str) -> Result<*mut libc::c_void> {
 
 
 /// Blit canvas → backend back buffer (multi-monitor или single).
+///
+/// Для multi-monitor: canvas копируется в back buffer каждого монитора.
+/// Если canvas меньше монитора — копируется только верхний-левый угол,
+/// остальное остаётся чёрным (заполняем нулем заранее). Если canvas
+/// больше — обрезается. Это корректно работает с разными разрешениями.
 fn blit_to_backend(canvas: &Canvas, multi: &Option<MultiMonitorBackend>, single: Option<&mut Backend>) {
     let canvas_data = canvas.data.lock();
+    let canvas_stride = canvas.stride as usize;
+    let canvas_w = canvas.width as usize;
+    let canvas_h = canvas.height as usize;
+
     if let Some(mb) = multi {
-        let (ptr, len, stride, _w, _h) = mb.active_back_buffer();
-        let canvas_stride = canvas.stride as usize;
-        let min_stride = canvas_stride.min(stride as usize);
-        let rows = canvas.height as usize;
-        let len_usize = len as usize;
-        for r in 0..rows {
-            let src_off = r * canvas_stride;
-            let dst_off = r * stride as usize;
-            let n = min_stride.min(canvas_data.len() - src_off).min(len_usize - dst_off);
-            unsafe {
-                std::ptr::copy_nonoverlapping(canvas_data.as_ptr().add(src_off),
-                                              ptr.add(dst_off), n);
+        // Копируем canvas в back buffer каждого монитора.
+        // Canvas — это virtual framebuffer (размер primary монитора).
+        // Для каждого монитора: копируем min(canvas_w, monitor_w) ×
+        // min(canvas_h, monitor_h) пикселей, с учётом stride.
+        for monitor in &mb.monitors {
+            let dst_ptr = monitor.back_mmap;
+            if dst_ptr.is_null() { continue; }
+            let dst_stride = monitor.stride as usize;
+            let dst_w = monitor.width as usize;
+            let dst_h = monitor.height as usize;
+            let dst_len = monitor.mmap_size as usize;
+            let copy_w = canvas_w.min(dst_w);
+            let copy_h = canvas_h.min(dst_h);
+            let copy_bytes = copy_w * 4; // XRGB8888 = 4 bytes/pixel
+
+            // Сначала заполняем весь monitor buffer чёрным — если canvas
+            // меньше монитора, края будут чёрными, а не мусором.
+            if canvas_w < dst_w || canvas_h < dst_h {
+                for r in 0..dst_h {
+                    let dst_off = r * dst_stride;
+                    if dst_off + dst_stride > dst_len { break; }
+                    unsafe {
+                        std::ptr::write_bytes(dst_ptr.add(dst_off), 0, dst_stride);
+                    }
+                }
+            }
+
+            // Копируем canvas в monitor buffer.
+            for r in 0..copy_h {
+                let src_off = r * canvas_stride;
+                let dst_off = r * dst_stride;
+                if src_off + copy_bytes > canvas_data.len() { break; }
+                if dst_off + copy_bytes > dst_len { break; }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        canvas_data.as_ptr().add(src_off),
+                        dst_ptr.add(dst_off),
+                        copy_bytes,
+                    );
+                }
             }
         }
     } else if let Some(sb) = single {
