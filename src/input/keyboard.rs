@@ -1,16 +1,10 @@
 //! Чтение клавиатуры через raw evdev (/dev/input/event*).
 //!
-//! libinput слишком много требует (seat, udev) — для замены agetty на TTY
-//! проще читать /dev/input/event* напрямую или /dev/tty через KDSKBMODE.
-//!
-//! Стратегия:
-//!   1. Открываем /dev/tty (это наш управляющий терминал от systemd).
-//!   2. Переключаем клавиатурный режим в K_RAW (или K_MEDIUMRAW) — читаем сканкоды.
-//!   3. Преобразуем scancodes в keycodes через встроенную таблицу.
-//!   4. Хоткеи SuperHot: Mod4 (Super) — префикс, как в i3.
-//!
-//! Альтернатива: открыть /dev/input/by-path/*-event-kbd напрямую. Это даёт
-//! доступ к сканкодам без K_RAW. Используем это как fallback.
+//! Device detection: перебираем /dev/input/event* и проверяем через
+//! EVIOCGBIT(EV_KEY, ...) что устройство поддерживает key events,
+//! плюс наличие типичных keyboard keys (KEY_ENTER, KEY_LEFTSHIFT, KEY_SPACE,
+//! KEY_ESC, KEY_A) в bitmap — это отличает клавиатуру от power button,
+//! ACPI кнопок, joystick'ов.
 
 use anyhow::Result;
 use std::os::unix::io::RawFd;
@@ -26,7 +20,27 @@ pub struct InputEvent {
     pub value: i32,
 }
 
+// evdev event types (linux/input-event-codes.h)
 const EV_KEY: u16 = 1;
+#[allow(dead_code)] // EV_SYN referenced in eviocgbit call as 0
+const EV_SYN: u16 = 0;
+
+// ioctl numbers for evdev. x86_64 encoding, matches libc on all Linux
+// architectures we target. libc crate doesn't expose EVIOC* constants.
+// EVIOCGBIT(ev, len) = _IOR('E', 0x20 + ev, u8[len])
+// _IOR(dir=2, type='E'=0x45, nr, size) = (2<<30) | (size<<16) | (0x45<<8) | nr
+const fn eviocgbit(ev: u32, len: u32) -> libc::c_ulong {
+    ((2u32 << 30) | (len << 16) | (0x45 << 8) | (0x20 + ev)) as libc::c_ulong
+}
+// EVIOCGRAB = _IOW('E', 0x90, int) = (1<<30) | (4<<16) | (0x45<<8) | 0x90
+const EVIOCGRAB: libc::c_ulong = ((1u32 << 30) | (4 << 16) | (0x45 << 8) | 0x90) as libc::c_ulong;
+
+// Key codes we check to identify a keyboard (must have most of these).
+const KEY_ENTER: u16 = 28;
+const KEY_LEFTSHIFT: u16 = 42;
+const KEY_SPACE: u16 = 57;
+const KEY_ESC: u16 = 1;
+const KEY_A: u16 = 30;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -48,7 +62,7 @@ pub enum Key {
 }
 
 #[derive(Debug, Copy, Clone)]
-#[allow(dead_code)] // Release(Key) produced but Key not read (release events ignored)
+#[allow(dead_code)] // Release(Key) produced but Key value not read
 pub enum KeyEvent {
     Press(Key),
     Release(Key),
@@ -58,7 +72,6 @@ pub enum KeyEvent {
 pub struct Keyboard {
     fd: RawFd,
     pressed: HashSet<u16>,
-    /// Shift state.
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
@@ -67,32 +80,52 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    /// Открывает /dev/input/event* для клавиатуры.
+    /// Открывает клавиатуру через /dev/input/event*.
+    ///
+    /// Использует EVIOCGBIT для проверки что устройство реально поддерживает
+    /// key events и имеет типичные клавиатурные keys. Перебираем все
+    /// event* устройства — не полагаемся на by-path symlinks (они зависят
+    /// от platform driver: i8042 для PS/2, usb для USB клавиатур, etc).
     pub fn open() -> Result<Self> {
-        let candidates = [
+        // Сначала пробуем by-path symlinks (быстрее, точнее).
+        let by_path_patterns = [
             "/dev/input/by-path/platform-i8042-serio-0-event-kbd",
-            "/dev/input/event0",
-            "/dev/input/event1",
-            "/dev/input/event2",
-            "/dev/input/event3",
+            "/dev/input/by-path/*-event-kbd",
         ];
-        for path in &candidates {
-            if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
-                use std::os::unix::io::IntoRawFd;
-                let fd = file.into_raw_fd();
-                log::info!("keyboard opened: {}", path);
-                return Keyboard::from_raw_fd(fd);
+        for pattern in &by_path_patterns {
+            if let Ok(entries) = glob::glob(pattern) {
+                for entry in entries.flatten() {
+                    if let Some(path_str) = entry.to_str() {
+                        if let Ok(fd) = open_device_rw(path_str) {
+                            if is_keyboard(fd) {
+                                log::info!("keyboard opened (by-path): {}", entry.display());
+                                return Keyboard::from_raw_fd(fd);
+                            }
+                            unsafe { libc::close(fd); }
+                        }
+                    }
+                }
             }
         }
-        anyhow::bail!("no keyboard device found in /dev/input/")
+
+        // Fallback: перебираем все /dev/input/event* с EVIOCGBIT проверкой.
+        for n in 0..=63u32 {
+            let path = format!("/dev/input/event{}", n);
+            if let Ok(fd) = open_device_rw(&path) {
+                if is_keyboard(fd) {
+                    log::info!("keyboard opened (event{}): {}", n, path);
+                    return Keyboard::from_raw_fd(fd);
+                }
+                unsafe { libc::close(fd); }
+            }
+        }
+        anyhow::bail!("no keyboard device found in /dev/input/ (checked event0..event63)")
     }
 
     /// Wrap an already-opened raw fd. Used after fork in privilege separation:
     /// parent (root) opens the device, child (superhot-tty user) wraps the
-    /// inherited fd. Applies EVIOCGRAB to prevent events leaking to the
-    /// underlying TTY.
+    /// inherited fd. Applies EVIOCGRAB to prevent events leaking to TTY.
     pub fn from_raw_fd(fd: RawFd) -> Result<Self> {
-        const EVIOCGRAB: libc::c_ulong = 0x40044590;
         let ret = unsafe { libc::ioctl(fd, EVIOCGRAB, 1) };
         if ret < 0 {
             log::warn!("EVIOCGRAB failed: {}", std::io::Error::last_os_error());
@@ -119,7 +152,6 @@ impl Keyboard {
                 let ev = unsafe { ptr.add(i).read() };
                 if ev.typ != EV_KEY { continue; }
                 let key = keycode_to_key(ev.code);
-                // Update modifiers.
                 match key {
                     Key::LeftShift | Key::RightShift => self.shift = ev.value != 0,
                     Key::LeftCtrl | Key::RightCtrl   => self.ctrl = ev.value != 0,
@@ -152,15 +184,61 @@ impl Keyboard {
 impl Drop for Keyboard {
     fn drop(&mut self) {
         unsafe {
-            const EVIOCGRAB: libc::c_ulong = 0x40044590;
-            libc::ioctl(self.fd, EVIOCGRAB, 0); // release grab
+            libc::ioctl(self.fd, EVIOCGRAB, 0);
             libc::close(self.fd);
         }
     }
 }
 
+/// Открывает устройство на чтение/запись, возвращает fd или io::Error.
+fn open_device_rw(path: &str) -> std::io::Result<RawFd> {
+    let c_path = std::ffi::CString::new(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+/// Проверяет, является ли устройство клавиатурой через EVIOCGBIT.
+///
+/// Устройство считается клавиатурой если:
+/// 1. Поддерживает EV_KEY (даёт key events)
+/// 2. Имеет в bitmap'е ключевые клавиши: KEY_ENTER, KEY_LEFTSHIFT, KEY_SPACE,
+///    KEY_ESC, KEY_A. Это отсекает power button, ACPI кнопки, joystick'и.
+fn is_keyboard(fd: RawFd) -> bool {
+    // Получаем bitmap поддерживаемых event types (EV_SYN..EV_MAX).
+    let mut ev_bits = [0u8; 4];
+    let ret = unsafe {
+        libc::ioctl(fd, eviocgbit(0 /* EV_SYN */, ev_bits.len() as u32), ev_bits.as_mut_ptr())
+    };
+    if ret < 0 { return false; }
+    // Проверяем что EV_KEY (bit 1) установлен.
+    if (ev_bits[0] & (1 << EV_KEY)) == 0 { return false; }
+
+    // Получаем bitmap поддерживаемых key codes. KEY_MAX = 0x2ff,
+    // нужен bitmap на 768 bits = 96 байт.
+    let mut key_bits = [0u8; 96];
+    let ret = unsafe {
+        libc::ioctl(fd, eviocgbit(EV_KEY as u32, key_bits.len() as u32), key_bits.as_mut_ptr())
+    };
+    if ret < 0 { return false; }
+
+    let has = |code: u16| -> bool {
+        let byte_idx = (code / 8) as usize;
+        let bit_idx = (code % 8) as u8;
+        if byte_idx >= key_bits.len() { return false; }
+        (key_bits[byte_idx] >> bit_idx) & 1 == 1
+    };
+
+    // Устройство — клавиатура если есть хотя бы 4 из 5 ключевых клавиш.
+    let required = [KEY_ENTER, KEY_LEFTSHIFT, KEY_SPACE, KEY_ESC, KEY_A];
+    let count = required.iter().filter(|&&k| has(k)).count();
+    count >= 4
+}
+
 /// Преобразует Linux keycode (input-event-codes) в Key.
-/// Reference: /usr/include/linux/input-event-codes.h
 fn keycode_to_key(code: u16) -> Key {
     match code {
         1  => Key::Escape,
@@ -189,11 +267,10 @@ fn keycode_to_key(code: u16) -> Key {
         100 => Key::RightAlt,
         125 => Key::LeftSuper,
         126 => Key::RightSuper,
-        // Letters.
-        2..=11 => Key::Char(((b'1' + (code - 2) as u8)) as char), // 1-9, 0
-        16..=25 => Key::Char(((b'q' + (code - 16) as u8)) as char), // q-p
-        30..=38 => Key::Char(((b'a' + (code - 30) as u8)) as char), // a-l
-        44..=50 => Key::Char(((b'z' + (code - 44) as u8)) as char), // z-m
+        2..=11 => Key::Char(((b'1' + (code - 2) as u8)) as char),
+        16..=25 => Key::Char(((b'q' + (code - 16) as u8)) as char),
+        30..=38 => Key::Char(((b'a' + (code - 30) as u8)) as char),
+        44..=50 => Key::Char(((b'z' + (code - 44) as u8)) as char),
         _ => Key::Other(code),
     }
 }
@@ -204,7 +281,6 @@ impl Key {
             Key::Char(c) => {
                 let c = *c;
                 if shift {
-                    // Shift map for letters & digits & symbols.
                     Some(match c {
                         'a'..='z' => ((c as u8) - 32) as char,
                         '1' => '!', '2' => '@', '3' => '#', '4' => '$', '5' => '%',

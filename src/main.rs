@@ -47,10 +47,86 @@ struct TerminalTile {
     pub workspace: u8,
 }
 
+/// Crash loop detection: если WM падал 3+ раз за последние 60 секунд,
+/// откатываемся на getty (exit с non-zero кодом, systemd перестанет
+/// перезапускать после StartLimitBurst).
+///
+/// Состояние: /run/superhot-tty-crashes — файл с timestamp'ами падений,
+/// по одному на строку. /run — tmpfs, очищается при перезагрузке.
+const CRASH_STATE_FILE: &str = "/run/superhot-tty-crashes";
+const CRASH_WINDOW_SECS: u64 = 60;
+const CRASH_THRESHOLD: usize = 3;
+
+fn check_crash_loop() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let crashes: Vec<u64> = std::fs::read_to_string(CRASH_STATE_FILE)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse::<u64>().ok())
+        .filter(|&ts| now.saturating_sub(ts) < CRASH_WINDOW_SECS)
+        .collect();
+
+    if crashes.len() >= CRASH_THRESHOLD {
+        eprintln!("============================================================");
+        eprintln!(" superhot-tty: CRASH LOOP DETECTED");
+        eprintln!(" {} crashes in the last {} seconds.", crashes.len(), CRASH_WINDOW_SECS);
+        eprintln!(" Falling back to getty to prevent system lockout.");
+        eprintln!(" To retry: sudo rm {} && sudo systemctl restart superhot-tty@tty1", CRASH_STATE_FILE);
+        eprintln!("============================================================");
+
+        restore_getty_tty1();
+        let _ = std::fs::remove_file(CRASH_STATE_FILE);
+        std::process::exit(1);
+    }
+}
+
+/// Записывает crash timestamp в state file. Вызывается из panic hook.
+fn record_crash() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(CRASH_STATE_FILE)
+    {
+        let _ = writeln!(f, "{}", now);
+    }
+}
+
+/// Восстанавливает getty на tty1 — удаляем override.conf который
+/// install.sh создал чтобы disable getty.
+fn restore_getty_tty1() {
+    let _ = std::fs::remove_file("/etc/systemd/system/getty@tty1.service.d/override.conf");
+    let _ = std::fs::remove_dir("/etc/systemd/system/getty@tty1.service.d");
+    let _ = std::process::Command::new("systemctl").args(["enable", "getty@tty1.service"]).output();
+    let _ = std::process::Command::new("systemctl").args(["disable", "superhot-tty@tty1.service"]).output();
+    let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).output();
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
+
+    // Panic hook — записываем crash timestamp для crash loop detection.
+    // catch_unwind в event loop ловит большинство panic, но если panic
+    // происходит до run_wm (init phase) или в privsep child — hook сработает.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_crash();
+        default_hook(info);
+    }));
+
+    // Crash loop detection — если падал 3+ раз за 60с, откатываемся на getty.
+    check_crash_loop();
+
     log::info!("superhot-tty v0.5 starting (privilege separation mode)");
 
     if unsafe { libc::geteuid() } != 0 {
@@ -512,6 +588,11 @@ fn run_wm(
     while !*quit_wm {
         let frame_start = Instant::now();
 
+        // Оборачиваем каждую итерацию в catch_unwind — panic в любом из
+        // обработчиков (render/input/PTY/X11) не убьёт WM, а будет
+        // залогирован и показан как popup. Без этого одиночный unwrap()
+        // на None убил бы весь WM и пользователь потерял бы unsaved данные.
+        let frame_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         // 0. Live reload — проверяем watcher.
         if let Some(w) = config_watcher.as_mut() {
             if w.poll() {
@@ -836,7 +917,29 @@ fn run_wm(
         for p in popups.iter_mut() { p.tick(); }
         popups.retain(|p| p.age < current_cfg.popups.duration_frames);
 
-        // 9. Framerate.
+        Ok(())
+        })); // end catch_unwind closure
+
+        // Обрабатываем результат: panic, error, или success.
+        match frame_result {
+            Err(panic_info) => {
+                let msg = panic_info.downcast_ref::<&'static str>().copied()
+                    .or_else(|| panic_info.downcast_ref::<String>().map(|s| s.as_str()))
+                    .unwrap_or("(non-string panic)");
+                log::error!("PANIC in WM frame (recovered): {}", msg);
+                popups.push(PopupWidget::info(
+                    &format!("internal error (recovered): {}", msg),
+                    canvas.width, canvas.height,
+                ));
+            }
+            Ok(Err(e)) => {
+                log::error!("WM frame error (recovered): {}", e);
+            }
+            Ok(Ok(())) => { /* normal frame */ }
+        }
+
+        // 9. Framerate cap — после catch_unwind, чтобы даже при panic
+        // мы не spun в busy-loop.
         let elapsed = frame_start.elapsed();
         let target = Duration::from_millis(1000 / current_cfg.general.framerate.max(1) as u64);
         if elapsed < target {
