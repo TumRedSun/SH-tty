@@ -181,7 +181,7 @@ impl LoginScreen {
             }
             LoginState::Password => {
                 let label = if cfg.language == "ru" { "Пароль:" } else { "Password:" };
-                let hidden: String = "•".repeat(self.password.len());
+                let hidden: String = "*".repeat(self.password.len());
                 let prompt = format!("{} {}", label, hidden);
                 let prompt_x = (screen_w as i32 - (prompt.len() as i32 + 1) * fw) / 2;
                 text.draw_text(prompt_x, center_y, &prompt, theme.fg_default, None);
