@@ -8,11 +8,6 @@
 //!
 //! Без feature `gamepad-sdl2` модуль работает в режиме "evdev passthrough only":
 //! мы не вмешиваемся в геймпад, Steam может его захватить.
-//!
-//! При активации SDL2 (cargo build --features gamepad-sdl2):
-//!   - Поддержка Xbox/PS4/PS5/Switch Pro/8BitDo/Steam Deck через SDL_GameController
-//!   - Встроенный database контроллеров (gamecontrollerdb.txt)
-//!   - Маппинг кнопок на клавиши через конфиг
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -35,7 +30,7 @@ impl GamepadManager {
 #[cfg(feature = "gamepad-sdl2")]
 pub struct GamepadManager {
     sdl: Option<sdl2::Sdl>,
-    controller_subsystem: Option<sdl2::controller::GameControllerSubsystem>,
+    controller_subsystem: Option<sdl2::GameControllerSubsystem>,
     controllers: Vec<sdl2::controller::GameController>,
     keymap: HashMap<String, String>,
     button_state: HashMap<sdl2::controller::Button, bool>,
@@ -47,7 +42,6 @@ pub struct GamepadManager {
 #[cfg(feature = "gamepad-sdl2")]
 impl GamepadManager {
     pub fn new(keymap: HashMap<String, String>, stick_sensitivity: u32, enabled: bool) -> Result<Self> {
-        use anyhow::Context;
         if !enabled {
             return Ok(GamepadManager {
                 sdl: None, controller_subsystem: None, controllers: Vec::new(),
@@ -55,8 +49,11 @@ impl GamepadManager {
                 last_input: std::time::Instant::now(), stick_sensitivity,
             });
         }
-        let sdl = sdl2::init().context("SDL2 init")?;
-        let controller_subsystem = sdl.game_controller().context("SDL2 game_controller subsystem")?;
+        // sdl2::init() returns Result<Sdl, String> — String doesn't impl
+        // std::error::Error, so we can't use anyhow::Context. Map manually.
+        let sdl = sdl2::init().map_err(|e| anyhow::anyhow!("SDL2 init: {}", e))?;
+        let controller_subsystem = sdl.game_controller()
+            .map_err(|e| anyhow::anyhow!("SDL2 game_controller subsystem: {}", e))?;
         let mut controllers = Vec::new();
         for i in 0..controller_subsystem.num_joysticks().unwrap_or(0) {
             if controller_subsystem.is_game_controller(i) {
@@ -85,54 +82,61 @@ impl GamepadManager {
     pub fn poll(&mut self) -> Vec<GamepadKey> {
         let mut keys = Vec::new();
         if let Some(sdl) = &self.sdl {
-            if let Some(mut pump) = sdl.event_pump() {
-                use sdl2::controller::Axis;
-                use sdl2::controller::Button;
-                use sdl2::event::Event;
-                for event in pump.poll_iter() {
-                    match event {
-                        Event::ControllerButtonDown { button, .. } => {
-                            self.button_state.insert(button, true);
-                            self.last_input = std::time::Instant::now();
-                            if let Some(key) = self.button_to_key(button) {
-                                keys.push(GamepadKey::Press(key));
-                            }
+            // event_pump() returns Result<EventPump, String> in sdl2 0.37.
+            let mut pump = match sdl.event_pump() {
+                Ok(p) => p,
+                Err(e) => {
+                    log::debug!("SDL2 event_pump error: {}", e);
+                    return keys;
+                }
+            };
+            use sdl2::controller::Axis;
+            use sdl2::controller::Button;
+            use sdl2::event::Event;
+            for event in pump.poll_iter() {
+                match event {
+                    Event::ControllerButtonDown { button, .. } => {
+                        self.button_state.insert(button, true);
+                        self.last_input = std::time::Instant::now();
+                        if let Some(key) = self.button_to_key(button) {
+                            keys.push(GamepadKey::Press(key));
                         }
-                        Event::ControllerButtonUp { button, .. } => {
-                            self.button_state.insert(button, false);
-                            if let Some(key) = self.button_to_key(button) {
-                                keys.push(GamepadKey::Release(key));
-                            }
-                        }
-                        Event::ControllerAxisMotion { axis, value, .. } => {
-                            self.stick_state.insert(axis, value);
-                            let threshold = ((self.stick_sensitivity as i32) * 320).clamp(8000, 28000) as i16;
-                            match axis {
-                                Axis::LeftX | Axis::RightX => {
-                                    if value > threshold { keys.push(GamepadKey::Press("Right".into())); }
-                                    else if value < -threshold { keys.push(GamepadKey::Press("Left".into())); }
-                                }
-                                Axis::LeftY | Axis::RightY => {
-                                    if value > threshold { keys.push(GamepadKey::Press("Down".into())); }
-                                    else if value < -threshold { keys.push(GamepadKey::Press("Up".into())); }
-                                }
-                                _ => {}
-                            }
-                            self.last_input = std::time::Instant::now();
-                        }
-                        Event::ControllerAdded { which, .. } => {
-                            if let Some(cs) = &self.controller_subsystem {
-                                if let Ok(c) = cs.open(which) {
-                                    log::info!("controller connected: {}", c.name());
-                                    self.controllers.push(c);
-                                }
-                            }
-                        }
-                        Event::ControllerRemoved { which, .. } => {
-                            self.controllers.retain(|c| c.instance_id() != which);
-                        }
-                        _ => {}
                     }
+                    Event::ControllerButtonUp { button, .. } => {
+                        self.button_state.insert(button, false);
+                        if let Some(key) = self.button_to_key(button) {
+                            keys.push(GamepadKey::Release(key));
+                        }
+                    }
+                    Event::ControllerAxisMotion { axis, value, .. } => {
+                        self.stick_state.insert(axis, value);
+                        let threshold = ((self.stick_sensitivity as i32) * 320).clamp(8000, 28000) as i16;
+                        match axis {
+                            Axis::LeftX | Axis::RightX => {
+                                if value > threshold { keys.push(GamepadKey::Press("Right".into())); }
+                                else if value < -threshold { keys.push(GamepadKey::Press("Left".into())); }
+                            }
+                            Axis::LeftY | Axis::RightY => {
+                                if value > threshold { keys.push(GamepadKey::Press("Down".into())); }
+                                else if value < -threshold { keys.push(GamepadKey::Press("Up".into())); }
+                            }
+                            _ => {}
+                        }
+                        self.last_input = std::time::Instant::now();
+                    }
+                    // sdl2 0.37 renamed ControllerAdded → ControllerDeviceAdded
+                    Event::ControllerDeviceAdded { which, .. } => {
+                        if let Some(cs) = &self.controller_subsystem {
+                            if let Ok(c) = cs.open(which) {
+                                log::info!("controller connected: {}", c.name());
+                                self.controllers.push(c);
+                            }
+                        }
+                    }
+                    Event::ControllerDeviceRemoved { which, .. } => {
+                        self.controllers.retain(|c| c.instance_id() != which);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -141,6 +145,8 @@ impl GamepadManager {
 
     fn button_to_key(&self, button: sdl2::controller::Button) -> Option<String> {
         use sdl2::controller::Button;
+        // sdl2 0.37 added Misc1, Paddle1-4, Touchpad variants — wildcard
+        // catches them so the match is exhaustive.
         let name = match button {
             Button::A => "a", Button::B => "b", Button::X => "x", Button::Y => "y",
             Button::DPadUp => "dpad_up", Button::DPadDown => "dpad_down",
@@ -149,6 +155,7 @@ impl GamepadManager {
             Button::LeftShoulder => "left_shoulder", Button::RightShoulder => "right_shoulder",
             Button::LeftStick => "left_stick", Button::RightStick => "right_stick",
             Button::Guide => "guide",
+            _ => return None, // Misc1, Paddle1-4, Touchpad — unmapped
         };
         self.keymap.get(name).cloned()
     }
