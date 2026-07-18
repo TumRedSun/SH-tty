@@ -61,7 +61,7 @@ Environment=LANG=en_US.UTF-8
 Environment=RUST_LOG=info
 Environment=SUPERHOT_TTY=1
 
-KillMode=mixed
+KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=5
 

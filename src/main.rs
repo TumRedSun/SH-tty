@@ -110,14 +110,35 @@ fn restore_getty_tty1() {
     let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).output();
 }
 
+/// SIGSEGV/SIGBUS handler — async-signal-safe logging.
+extern "C" fn sigsegv_handler(_sig: libc::c_int) {
+    // Используем только async-signal-safe функции.
+    let msg = b"SIGSEGV/SIGBUS caught - recording crash and aborting\n";
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const _, msg.len());
+    }
+    record_crash();
+    // Восстанавливаем default handler и re-raise чтобы получить core dump.
+    unsafe {
+        libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+        libc::signal(libc::SIGBUS, libc::SIG_DFL);
+        libc::raise(_sig);
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
+    // SIGSEGV/SIGBUS handler — логируем и записываем crash перед смертью.
+    // catch_unwind не ловит segfault, поэтому нужен signal handler.
+    unsafe {
+        libc::signal(libc::SIGSEGV, sigsegv_handler as libc::sighandler_t);
+        libc::signal(libc::SIGBUS, sigsegv_handler as libc::sighandler_t);
+    }
+
     // Panic hook — записываем crash timestamp для crash loop detection.
-    // catch_unwind в event loop ловит большинство panic, но если panic
-    // происходит до run_wm (init phase) или в privsep child — hook сработает.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         record_crash();
@@ -951,7 +972,9 @@ fn run_wm(
         animations.tick();
 
         // 7. Flip.
+        log::trace!("frame: blit");
         blit_to_backend(&canvas, &multi_backend, single_backend.as_mut());
+        log::trace!("frame: flip");
         flip_backend(&mut multi_backend, single_backend.as_mut())?;
 
         // 8. Popups tick.
