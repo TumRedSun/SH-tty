@@ -30,6 +30,19 @@ pub enum LoginState {
     Quit,
 }
 
+/// Применяет Shift к символу: a→A, 1→!, etc.
+fn apply_shift(ch: char) -> char {
+    match ch {
+        'a'..='z' => ((ch as u8) - 32) as char,
+        '1' => '!', '2' => '@', '3' => '#', '4' => '$', '5' => '%',
+        '6' => '^', '7' => '&', '8' => '*', '9' => '(', '0' => ')',
+        '-' => '_', '=' => '+', '[' => '{', ']' => '}',
+        '\\' => '|', ';' => ':', '\'' => '"',
+        ',' => '<', '.' => '>', '/' => '?',
+        '`' => '~', _ => ch,
+    }
+}
+
 pub struct LoginScreen {
     pub state: LoginState,
     pub username: String,
@@ -83,7 +96,9 @@ impl LoginScreen {
                     }
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.username.len() < 32 {
-                            self.username.push(c.chars().next().unwrap());
+                            let mut ch = c.chars().next().unwrap();
+                            if shift { ch = apply_shift(ch); }
+                            self.username.push(ch);
                         }
                     }
                     _ => {}
@@ -102,7 +117,9 @@ impl LoginScreen {
                     }
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.password.len() < 64 {
-                            self.password.push(c.chars().next().unwrap());
+                            let mut ch = c.chars().next().unwrap();
+                            if shift { ch = apply_shift(ch); }
+                            self.password.push(ch);
                         }
                     }
                     _ => {}
