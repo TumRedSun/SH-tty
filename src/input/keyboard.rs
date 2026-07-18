@@ -267,10 +267,20 @@ fn keycode_to_key(code: u16) -> Key {
         100 => Key::RightAlt,
         125 => Key::LeftSuper,
         126 => Key::RightSuper,
-        2..=11 => Key::Char(((b'1' + (code - 2) as u8)) as char),
-        16..=25 => Key::Char(((b'q' + (code - 16) as u8)) as char),
-        30..=38 => Key::Char(((b'a' + (code - 30) as u8)) as char),
-        44..=50 => Key::Char(((b'z' + (code - 44) as u8)) as char),
+        2..=11 => Key::Char(((b'1' + (code - 2) as u8)) as char), // 1-9, 0
+        // QWERTY row 1: Q W E R T Y U I O P (keycodes 16-25)
+        16 => Key::Char('q'), 17 => Key::Char('w'), 18 => Key::Char('e'),
+        19 => Key::Char('r'), 20 => Key::Char('t'), 21 => Key::Char('y'),
+        22 => Key::Char('u'), 23 => Key::Char('i'), 24 => Key::Char('o'),
+        25 => Key::Char('p'),
+        // QWERTY row 2: A S D F G H J K L (keycodes 30-38)
+        30 => Key::Char('a'), 31 => Key::Char('s'), 32 => Key::Char('d'),
+        33 => Key::Char('f'), 34 => Key::Char('g'), 35 => Key::Char('h'),
+        36 => Key::Char('j'), 37 => Key::Char('k'), 38 => Key::Char('l'),
+        // QWERTY row 3: Z X C V B N M (keycodes 44-50)
+        44 => Key::Char('z'), 45 => Key::Char('x'), 46 => Key::Char('c'),
+        47 => Key::Char('v'), 48 => Key::Char('b'), 49 => Key::Char('n'),
+        50 => Key::Char('m'),
         _ => Key::Other(code),
     }
 }
