@@ -257,8 +257,10 @@ impl DrmBackend {
         let crtcs_count = res.count_crtcs as usize;
         let mut connector_ids = vec![0u32; connectors_count];
         let mut crtc_ids = vec![0u32; crtcs_count];
-        res.connector_id_ptr = connector_ids.as_mut_ptr() as u64;
+        res.fb_id_ptr = 0;
         res.crtc_id_ptr = crtc_ids.as_mut_ptr() as u64;
+        res.connector_id_ptr = connector_ids.as_mut_ptr() as u64;
+        res.encoder_id_ptr = 0;
         let _ = ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res)?;
         log::debug!("DRM resources: {} connectors, {} crtcs", connectors_count, crtcs_count);
 
@@ -446,6 +448,9 @@ pub fn enumerate_connectors(fd: RawFd) -> Result<Vec<ConnectorInfo>> {
     let n = res.count_connectors as usize;
     let mut connector_ids = vec![0u32; n];
     res.connector_id_ptr = connector_ids.as_mut_ptr() as u64;
+    res.fb_id_ptr = 0;
+    res.crtc_id_ptr = 0;
+    res.encoder_id_ptr = 0;
     ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res)?;
 
     let mut out = Vec::new();
