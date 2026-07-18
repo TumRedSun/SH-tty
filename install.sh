@@ -127,12 +127,10 @@ install -Dm644 systemd/superhot-tty@.service /etc/systemd/system/superhot-tty@.s
 
 echo_blue "==> Installing default config..."
 install -d -m755 /etc/superhot-tty
-if [[ ! -f /etc/superhot-tty/config.toml ]]; then
-    install -Dm644 config/default.toml /etc/superhot-tty/config.toml
-    echo_green "Installed /etc/superhot-tty/config.toml (edit to customize)"
-else
-    echo_yellow "/etc/superhot-tty/config.toml already exists — keeping user config"
-fi
+# Всегда перезаписываем config.toml последней версией.
+# Пользовательские настройки могут быть в ~/.config/SH-tty/config.toml
+install -Dm644 config/default.toml /etc/superhot-tty/config.toml
+echo_green "Installed /etc/superhot-tty/config.toml (updated)"
 
 # Дизейблим стандартный getty на tty1.
 echo_blue "==> Disabling default getty on tty1..."
