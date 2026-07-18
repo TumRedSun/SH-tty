@@ -22,14 +22,14 @@ use std::os::unix::io::RawFd;
 const DRM_IOCTL_SET_MASTER: u32      = io(0x64, 0x1e); // no args
 const DRM_IOCTL_DROP_MASTER: u32     = io(0x64, 0x1f);
 
-// DRM_MODE_ ioctls (NR starts at 0xA0).
-const DRM_IOCTL_MODE_GETRESOURCES: u32      = ior(0xA0, 0, std::mem::size_of::<drm_mode_card_res>() as u32);
-const DRM_IOCTL_MODE_GETCONNECTOR: u32      = iowr(0xA0, 7, std::mem::size_of::<drm_mode_get_connector>() as u32);
-const DRM_IOCTL_MODE_GETENCODER: u32        = ior(0xA0, 8, std::mem::size_of::<drm_mode_get_encoder>() as u32);
-const DRM_IOCTL_MODE_SETCRTC: u32           = iow(0xA0, 10, std::mem::size_of::<drm_mode_crtc>() as u32);
-const DRM_IOCTL_MODE_CREATE_DUMB: u32       = iowr(0xA0, 0xB2, std::mem::size_of::<drm_mode_create_dumb>() as u32);
-const DRM_IOCTL_MODE_MAP_DUMB: u32          = iowr(0xA0, 0xB3, std::mem::size_of::<drm_mode_map_dumb>() as u32);
-const DRM_IOCTL_MODE_DESTROY_DUMB: u32      = iowr(0xA0, 0xB4, std::mem::size_of::<drm_mode_destroy_dumb>() as u32);
+// DRM_MODE_ ioctls: type='d'=0x64, NR starts at 0xA0.
+const DRM_IOCTL_MODE_GETRESOURCES: u32      = iowr(0x64, 0xA0, std::mem::size_of::<drm_mode_card_res>() as u32);
+const DRM_IOCTL_MODE_GETCONNECTOR: u32      = iowr(0x64, 0xA7, std::mem::size_of::<drm_mode_get_connector>() as u32);
+const DRM_IOCTL_MODE_GETENCODER: u32        = ior(0x64, 0xA8, std::mem::size_of::<drm_mode_get_encoder>() as u32);
+const DRM_IOCTL_MODE_SETCRTC: u32           = iow(0x64, 0xAA, std::mem::size_of::<drm_mode_crtc>() as u32);
+const DRM_IOCTL_MODE_CREATE_DUMB: u32       = iowr(0x64, 0xB2, std::mem::size_of::<drm_mode_create_dumb>() as u32);
+const DRM_IOCTL_MODE_MAP_DUMB: u32          = iowr(0x64, 0xB3, std::mem::size_of::<drm_mode_map_dumb>() as u32);
+const DRM_IOCTL_MODE_DESTROY_DUMB: u32      = iowr(0x64, 0xB4, std::mem::size_of::<drm_mode_destroy_dumb>() as u32);
 
 // Public helpers for submodules (cursor, planes).
 pub const fn io(typ: u32, nr: u32) -> u32 { _io(typ, nr) }
@@ -37,8 +37,8 @@ pub const fn ior(typ: u32, nr: u32, size: u32) -> u32 { (2 << 30) | (size << 16)
 pub const fn iow(typ: u32, nr: u32, size: u32) -> u32 { (1 << 30) | (size << 16) | (typ << 8) | nr }
 pub const fn iowr(typ: u32, nr: u32, size: u32) -> u32 { (3 << 30) | (size << 16) | (typ << 8) | nr }
 pub const DRM_IOCTL_MODE_DESTROY_DUMB_PUB: u32 = DRM_IOCTL_MODE_DESTROY_DUMB;
-const DRM_IOCTL_MODE_ADDFB2: u32            = iowr(0xA0, 0xB8, std::mem::size_of::<drm_mode_fb_cmd2>() as u32);
-const DRM_IOCTL_MODE_PAGE_FLIP: u32         = iow(0xA0, 0x0B, std::mem::size_of::<drm_mode_crtc_page_flip>() as u32);
+const DRM_IOCTL_MODE_ADDFB2: u32            = iowr(0x64, 0xB8, std::mem::size_of::<drm_mode_fb_cmd2>() as u32);
+const DRM_IOCTL_MODE_PAGE_FLIP: u32         = iow(0x64, 0xAB, std::mem::size_of::<drm_mode_crtc_page_flip>() as u32);
 
 // Encoding helpers (linux asm-generic ioctl encoding: dir<<30 | size<<16 | type<<8 | nr)
 const fn _io(typ: u32, nr: u32) -> u32 { (0 << 30) | (0 << 16) | (typ << 8) | nr }

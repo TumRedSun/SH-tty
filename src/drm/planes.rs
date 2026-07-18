@@ -21,17 +21,17 @@ use crate::drm::kms::*;
 use crate::x11::dri3::DmaBuf;
 
 // DRM_IOCTL_MODE_GETPLANERESOURCES
-const DRM_IOCTL_MODE_GETPLANERESOURCES: u32 = iowr(0xA0, 0x36, std::mem::size_of::<DrmModeGetPlaneRes>() as u32);
+const DRM_IOCTL_MODE_GETPLANERESOURCES: u32 = iowr(0x64, 0xD6, std::mem::size_of::<DrmModeGetPlaneRes>() as u32);
 // DRM_IOCTL_MODE_GETPLANE
-const DRM_IOCTL_MODE_GETPLANE: u32 = iowr(0xA0, 0x37, std::mem::size_of::<DrmModeGetPlane>() as u32);
+const DRM_IOCTL_MODE_GETPLANE: u32 = iowr(0x64, 0xD7, std::mem::size_of::<DrmModeGetPlane>() as u32);
 // DRM_IOCTL_MODE_SETPLANE (legacy, non-atomic)
-const DRM_IOCTL_MODE_SETPLANE: u32 = iow(0xA0, 0x38, std::mem::size_of::<DrmModeSetPlane>() as u32);
+const DRM_IOCTL_MODE_SETPLANE: u32 = iow(0x64, 0xD8, std::mem::size_of::<DrmModeSetPlane>() as u32);
 // DRM_IOCTL_PRIME_FD_TO_HANDLE
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = iowr(0x64, 0x2E, std::mem::size_of::<DrmPrimeHandle>() as u32);
 // DRM_IOCTL_MODE_ADDFB2
-const DRM_IOCTL_MODE_ADDFB2: u32 = iowr(0xA0, 0xB8, std::mem::size_of::<DrmModeFbCmd2>() as u32);
+const DRM_IOCTL_MODE_ADDFB2: u32 = iowr(0x64, 0xB8, std::mem::size_of::<DrmModeFbCmd2>() as u32);
 // DRM_IOCTL_MODE_RMFB
-const DRM_IOCTL_MODE_RMFB: u32 = ior(0xA0, 0x05, 4);
+const DRM_IOCTL_MODE_RMFB: u32 = ior(0x64, 0xA5, 4);
 
 // DRM_MODE_PROP enums и property IDs нам нужны для atomic commit.
 // CRTC_ID, FB_ID, SRC_X/Y/W/H, CRTC_X/Y/W/H, type

@@ -17,8 +17,8 @@ use anyhow::Result;
 use std::os::unix::io::RawFd;
 use crate::drm::kms::*;
 
-// DRM_IOCTL_MODE_CURSOR2 (с hot spot, modern).
-const DRM_IOCTL_MODE_CURSOR2: u32 = iowr(0xA0, 0x1D, std::mem::size_of::<DrmModeCursor2>() as u32);
+// DRM_IOCTL_MODE_CURSOR2 (с hot spot, modern). NR = 0xA0 + 0x1D = 0xBD
+const DRM_IOCTL_MODE_CURSOR2: u32 = iowr(0x64, 0xBD, std::mem::size_of::<DrmModeCursor2>() as u32);
 
 #[repr(C)]
 #[derive(Default, Debug)]
