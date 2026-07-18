@@ -3,7 +3,7 @@
 # Запускать от root: sudo ./install.sh
 #
 # Что нового в v0.2:
-#   - TOML конфиг /etc/superhot-tty/config.toml
+#   - TOML конфиг /etc/SH-tty/config.toml
 #   - Workspaces 1-9 + перемещение окон между ними
 #   - Launcher Super+D (rofi-подобный, читает .desktop файлы)
 #   - Mouse + софтверный курсор MCD-стиля
@@ -126,11 +126,11 @@ echo_blue "==> Installing systemd unit..."
 install -Dm644 systemd/superhot-tty@.service /etc/systemd/system/superhot-tty@.service
 
 echo_blue "==> Installing default config..."
-install -d -m755 /etc/superhot-tty
+install -d -m755 /etc/SH-tty
 # Всегда перезаписываем config.toml последней версией.
 # Пользовательские настройки могут быть в ~/.config/SH-tty/config.toml
-install -Dm644 config/default.toml /etc/superhot-tty/config.toml
-echo_green "Installed /etc/superhot-tty/config.toml (updated)"
+install -Dm644 config/default.toml /etc/SH-tty/config.toml
+echo_green "Installed /etc/SH-tty/config.toml (updated)"
 
 # Дизейблим стандартный getty на tty1.
 echo_blue "==> Disabling default getty on tty1..."
@@ -192,8 +192,8 @@ echo "  8. Mod4+Shift+1..9 — переместить окно на другой
 echo "  9. Mod4+R — resize mode (HJKL)"
 echo ""
 echo_blue "Configuration:"
-echo "  /etc/superhot-tty/config.toml  — основной конфиг"
-echo "  /etc/superhot-tty/font.psfu    — кастомный шрифт (опционально)"
+echo "  /etc/SH-tty/config.toml  — основной конфиг"
+echo "  /etc/SH-tty/font.psfu    — кастомный шрифт (опционально)"
 echo ""
 echo_blue "Audio (PipeWire):"
 echo "  pactl set-sink-volume @DEFAULT_SINK@ 80%   — громкость"
