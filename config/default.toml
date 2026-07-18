@@ -539,7 +539,7 @@ debounce_ms = 250                  # задержка перед перечит�
 [animations]
 workspace_transition = true
 new_window = true
-random_glitch = true
+random_glitch = false
 
 # ws transition — три фазы:
 ws_transition_ms = 250             # фаза 1: сплошной перебор всего экрана
