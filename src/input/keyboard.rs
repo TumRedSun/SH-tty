@@ -268,19 +268,27 @@ fn keycode_to_key(code: u16) -> Key {
         125 => Key::LeftSuper,
         126 => Key::RightSuper,
         2..=11 => Key::Char(((b'1' + (code - 2) as u8)) as char), // 1-9, 0
+        // Number row symbols (Shift)
+        12 => Key::Char('-'), 13 => Key::Char('='),
         // QWERTY row 1: Q W E R T Y U I O P (keycodes 16-25)
         16 => Key::Char('q'), 17 => Key::Char('w'), 18 => Key::Char('e'),
         19 => Key::Char('r'), 20 => Key::Char('t'), 21 => Key::Char('y'),
         22 => Key::Char('u'), 23 => Key::Char('i'), 24 => Key::Char('o'),
         25 => Key::Char('p'),
+        26 => Key::Char('['), 27 => Key::Char(']'),
         // QWERTY row 2: A S D F G H J K L (keycodes 30-38)
         30 => Key::Char('a'), 31 => Key::Char('s'), 32 => Key::Char('d'),
         33 => Key::Char('f'), 34 => Key::Char('g'), 35 => Key::Char('h'),
         36 => Key::Char('j'), 37 => Key::Char('k'), 38 => Key::Char('l'),
+        39 => Key::Char(';'), 40 => Key::Char('\''),
+        41 => Key::Char('`'),
+        // Left Shift is 42 (already mapped above)
+        43 => Key::Char('\\'),
         // QWERTY row 3: Z X C V B N M (keycodes 44-50)
         44 => Key::Char('z'), 45 => Key::Char('x'), 46 => Key::Char('c'),
         47 => Key::Char('v'), 48 => Key::Char('b'), 49 => Key::Char('n'),
         50 => Key::Char('m'),
+        51 => Key::Char(','), 52 => Key::Char('.'), 53 => Key::Char('/'),
         _ => Key::Other(code),
     }
 }

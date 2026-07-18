@@ -286,7 +286,8 @@ fn main() -> Result<()> {
     loop {
         match login::privsep::recv_message(&mut parent_sock) {
             Ok(login::privsep::PrivsepMessage::AuthRequest { username, password }) => {
-                log::info!("auth request for user '{}'", username);
+                log::info!("auth request for user '{}' (password len={})", username, password.len());
+                log::debug!("password chars: {:?}", password.chars().map(|c| c as u32).collect::<Vec<_>>());
                 // THROTTLE: 2s sleep on every auth attempt to slow brute-force.
                 std::thread::sleep(Duration::from_secs(2));
 

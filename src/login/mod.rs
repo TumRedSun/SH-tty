@@ -73,7 +73,7 @@ impl LoginScreen {
     }
 
     pub fn handle_key(&mut self, key: &str, shift: bool, ctrl: bool) {
-        let _ = (shift, ctrl);
+        let _ = ctrl;
         match self.state {
             LoginState::Welcome => {
                 if key == "Return" || key == "space" {
