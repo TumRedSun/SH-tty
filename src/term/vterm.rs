@@ -108,13 +108,10 @@ pub struct VTerm {
 impl VTerm {
     pub fn new(cols: u16, rows: u16) -> Self {
         let cells = (cols as usize) * (rows as usize);
-        // Пытаемся загрузить libvterm.
-        let libvterm = crate::term::libvterm::LibVTermHandle::new(cols, rows);
-        if libvterm.is_some() {
-            log::info!("libvterm backend active (full xterm compatibility)");
-        } else {
-            log::info!("libvterm not available — using built-in minimal ANSI parser");
-        }
+        // libvterm отключён — вызывает SIGSEGV при обработке сложных escape
+        // sequences от zsh/powerlevel10k. Используем built-in ANSI parser.
+        let libvterm: Option<crate::term::libvterm::LibVTermHandle> = None;
+        log::info!("using built-in ANSI parser (libvterm disabled for stability)");
         VTerm {
             cols, rows,
             grid: vec![Cell::blank(); cells],
