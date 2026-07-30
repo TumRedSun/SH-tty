@@ -14,7 +14,7 @@ BuildRequires:  pam-devel
 Requires:       systemd
 Requires:       kbd
 Requires:       zsh
-Requires:       xorg-x11-server-Xephyr
+Requires:       xorg-x11-server-Xvfb
 Requires:       pipewire
 Requires:       pipewire-pulse
 Requires:       wireplumber
@@ -32,7 +32,7 @@ Features:
   * Tile-based BSP/i3 layout
   * 10 workspaces with multi-monitor binding
   * Rofi-like launcher (Super+D)
-  * X11 window embedding via Xephyr + XComposite
+  * X11 window embedding via Xvfb + XComposite
   * DRI3+DMA-BUF GPU acceleration infrastructure
   * PipeWire audio stack
   * xdg-desktop-portal ScreenCast backend

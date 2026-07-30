@@ -198,6 +198,112 @@ max_width_pct = 67
 glitch_border = true
 # font = "Lat2-Terminus16"     # optional override
 
+# ===== Status Bar (polybar/waybar-style) =====
+# Полностью настраиваемая нижняя (или верхняя) панель. Все элементы
+# настраиваются здесь — никаких захардкоженных надписей.
+#
+# Параметры [bar]:
+#   enabled       — показывать панель или нет
+#   position      — "top" или "bottom"
+#   height        — высота в пикселях
+#   bg            — цвет фона (hex "#RRGGBB"). Пусто = встроенный тёмный.
+#   fg            — цвет текста по умолчанию. Пусто = theme.fg_default.
+#   active_bg     — фон активного элемента (например активного workspace).
+#   active_fg     — текст активного элемента.
+#   separators    — показывать разделитель между модулями.
+#   separator     — символ разделителя.
+#
+# Модули ([[bar.modules]]):
+#   name        — уникальное имя (для логов)
+#   type        — тип: workspaces | clock | cpu | memory | battery |
+#                        network | text | custom
+#   position    — позиция в bar: "left" / "center" / "right"
+#   format      — формат вывода (см. ниже для каждого типа)
+#   color       — цвет текста (hex). Пусто = bar.fg
+#   refresh_ms  — интервал обновления в мс (для динамических модулей).
+#                 0 = каждый кадр (не рекомендуется для custom).
+#   cmd         — для custom: команда для запуска.
+#                 для text: статичный текст.
+#   args        — для custom: аргументы команды.
+#   max_len     — максимальная длина вывода (обрезается с "...").
+#
+# Формат по типам:
+#   workspaces: "{n}" (номер), "{name}" (имя), "{n}:{name}" (по умолчанию)
+#   clock:      strftime format — "%H:%M", "%H:%M:%S", "%Y-%m-%d %H:%M"
+#   cpu:        "{percent}" (например "CPU {percent}%")
+#   memory:     "{percent}"
+#   battery:    "{percent}"
+#   network:    "{iface}" (интерфейс), "{ip}" (IPv4 адрес)
+#   text:       игнорируется (используйте cmd как содержимое)
+#   custom:     "{}" подставляется stdout команды, или используйте
+#                произвольную строку с "{}"
+[bar]
+enabled = true
+position = "bottom"            # "top" или "bottom"
+height = 24
+# bg = "#0A0716"               # empty = use built-in dark
+# fg = "#E6E1F0"               # empty = use theme.fg_default
+# active_bg = "#FF2E97"        # active workspace background
+# active_fg = "#FFFFFF"        # active workspace foreground
+separators = false
+separator = " | "
+
+# Слева: workspaces + имя хоста
+[[bar.modules]]
+name = "ws"
+type = "workspaces"
+position = "left"
+format = "{n}:{name}"
+refresh_ms = 0
+
+[[bar.modules]]
+name = "hostname"
+type = "text"
+position = "left"
+cmd = "archlinux"             # статичный текст
+color = "#00F0FF"
+
+# Центр: CPU и RAM
+[[bar.modules]]
+name = "cpu"
+type = "cpu"
+position = "center"
+format = "CPU {percent}%"
+color = "#FF2E97"
+refresh_ms = 2000
+
+[[bar.modules]]
+name = "mem"
+type = "memory"
+position = "center"
+format = "RAM {percent}%"
+color = "#FF2E97"
+refresh_ms = 2000
+
+# Справа: сеть + батарея + часы
+[[bar.modules]]
+name = "net"
+type = "network"
+position = "right"
+format = "{iface} {ip}"
+refresh_ms = 5000
+
+[[bar.modules]]
+name = "bat"
+type = "battery"
+position = "right"
+format = "BAT {percent}%"
+refresh_ms = 5000
+
+[[bar.modules]]
+name = "clock"
+type = "clock"
+position = "right"
+format = "%H:%M"              # strftime — время в UTC. Для localtime используйте
+                                # custom модуль с cmd = "date +%H:%M"
+color = "#00F0FF"
+refresh_ms = 1000
+
 # ===== Key bindings =====
 # Все биндинги в конфиге. Нет захардкоженных.
 # mods: Super, Ctrl, Alt, Shift

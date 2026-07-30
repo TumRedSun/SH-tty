@@ -13,7 +13,8 @@ depends=(
     'pam'
 )
 optdepends=(
-    'xorg-server-xephyr: X11 tile embedding'
+    'xorg-server-xvfb: X11 tile embedding (preferred, works on pure TTY)'
+    'xorg-server-xephyr: X11 tile embedding (fallback, requires host X server)'
     'pipewire: audio support'
     'pipewire-pulse: PulseAudio compatibility'
     'wireplumber: PipeWire session manager'

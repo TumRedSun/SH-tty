@@ -3,7 +3,7 @@ Version: 0.3.0-1
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: systemd, kbd, zsh, xserver-xephyr, pipewire, pipewire-pulse, wireplumber, xdg-desktop-portal, libpam0g
+Depends: systemd, kbd, zsh, xvfb, pipewire, pipewire-pulse, wireplumber, xdg-desktop-portal, libpam0g
 Recommends: xdg-desktop-portal-gtk
 Suggests: libsdl2-dev
 Maintainer: SuperHot TTY contributors
@@ -16,7 +16,7 @@ Description: SuperHot MCD-styled TTY window manager
    * Tile-based BSP/i3 layout
    * 10 workspaces with multi-monitor binding
    * Rofi-like launcher (Super+D)
-   * X11 window embedding via Xephyr + XComposite
+   * X11 window embedding via Xvfb + XComposite
    * DRI3+DMA-BUF GPU acceleration infrastructure
    * PipeWire audio stack
    * xdg-desktop-portal ScreenCast backend

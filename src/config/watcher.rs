@@ -170,6 +170,7 @@ pub struct ConfigDiff {
     pub general_changed: bool,
     pub x11_changed: bool,
     pub monitors_changed: bool,
+    pub bar_changed: bool,
 }
 
 impl ConfigDiff {
@@ -188,6 +189,7 @@ impl ConfigDiff {
         d.monitors_changed = old.monitors.len() != new.monitors.len()
             || old.monitors.iter().zip(new.monitors.iter())
                 .any(|(a, b)| !monitor_eq(a, b));
+        d.bar_changed = !bar_eq(&old.bar, &new.bar);
         d
     }
 
@@ -195,6 +197,7 @@ impl ConfigDiff {
         self.theme_changed || self.keybindings_changed || self.window_rules_changed
             || self.animations_changed || self.ipc_changed || self.live_reload_changed
             || self.general_changed || self.x11_changed || self.monitors_changed
+            || self.bar_changed
     }
 }
 
@@ -259,6 +262,21 @@ fn monitor_eq(a: &crate::config::MonitorCfg, b: &crate::config::MonitorCfg) -> b
         && a.position == b.position && a.enabled == b.enabled
 }
 
+fn bar_eq(a: &crate::config::BarCfg, b: &crate::config::BarCfg) -> bool {
+    a.enabled == b.enabled && a.position == b.position && a.height == b.height
+        && a.bg == b.bg && a.fg == b.fg && a.active_bg == b.active_bg
+        && a.active_fg == b.active_fg && a.separators == b.separators
+        && a.separator == b.separator
+        && a.modules.len() == b.modules.len()
+        && a.modules.iter().zip(b.modules.iter()).all(|(x, y)| bar_module_eq(x, y))
+}
+
+fn bar_module_eq(a: &crate::config::BarModuleCfg, b: &crate::config::BarModuleCfg) -> bool {
+    a.name == b.name && a.type_ == b.type_ && a.position == b.position
+        && a.format == b.format && a.color == b.color && a.refresh_ms == b.refresh_ms
+        && a.cmd == b.cmd && a.args == b.args && a.max_len == b.max_len
+}
+
 fn window_rule_eq(a: &crate::config::WindowRule, b: &crate::config::WindowRule) -> bool {
     a.match_class == b.match_class && a.match_title == b.match_title
         && a.match_app_id == b.match_app_id && a.regex == b.regex
@@ -280,5 +298,6 @@ pub fn diff_summary(d: &ConfigDiff) -> HashMap<String, bool> {
     m.insert("general".into(), d.general_changed);
     m.insert("x11".into(), d.x11_changed);
     m.insert("monitors".into(), d.monitors_changed);
+    m.insert("bar".into(), d.bar_changed);
     m
 }

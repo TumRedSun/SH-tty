@@ -60,7 +60,8 @@ DEPS=(
     pkgconf
     systemd
     # X11 встраивание:
-    xorg-server-xephyr
+    xorg-server-xvfb
+    xorg-server-xephyr  # fallback if Xvfb is unavailable
     # Звук:
     pipewire
     pipewire-pulse

@@ -54,6 +54,11 @@ pub struct Config {
     /// IPC сокет (как i3-msg).
     #[serde(default)]
     pub ipc: IpcCfg,
+    /// Status bar — полность настраиваемая, как polybar/waybar.
+    /// Включая позицию (top/bottom), высоту, цвета, и набор модулей
+    /// (workspaces, clock, cpu, memory, battery, network, custom command, text).
+    #[serde(default)]
+    pub bar: BarCfg,
     /// Внутренний флаг: используется для live reload — сохраняет пути поиска конфига.
     #[serde(skip)]
     pub _config_path: Option<std::path::PathBuf>,
@@ -771,6 +776,144 @@ pub fn config_paths() -> Vec<String> {
     v
 }
 
+// ===== Bar (status bar — polybar/waybar-style) =====
+
+/// Конфигурация status bar.
+///
+/// Полностью настраиваемая панель: позиция (top/bottom), высота, цвета,
+/// и набор модулей. Каждый модуль имеет тип, позицию (left/center/right),
+/// формат вывода, цвет, и интервал обновления (для динамических модулей).
+///
+/// Поддерживаемые типы модулей:
+///   - `workspaces` — список рабочих пространств (с подсветкой активного)
+///   - `clock` — текущее время/дата (strftime-совместимый format string)
+///   - `cpu` — загрузка CPU в %
+///   - `memory` — использование RAM в %
+///   - `battery` — заряд батареи в % (читает /sys/class/power_supply)
+///   - `network` — IP-адрес активного интерфейса
+///   - `text` — статичный текст (например имя хоста или логин)
+///   - `custom` — вывод shell-команды (кэшируется на refresh_ms)
+#[derive(Debug, Clone, Deserialize)]
+pub struct BarCfg {
+    /// Включена ли панель вообще.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Позиция: "top" или "bottom".
+    #[serde(default = "default_bar_position")]
+    pub position: String,
+    /// Высота в пикселях.
+    #[serde(default = "default_bar_height")]
+    pub height: u32,
+    /// Цвет фона (hex). Пусто = theme.bg.
+    #[serde(default)]
+    pub bg: Option<String>,
+    /// Цвет текста по умолчанию (hex). Пусто = theme.fg_default.
+    #[serde(default)]
+    pub fg: Option<String>,
+    /// Цвет фона активного элемента (например активного workspace).
+    #[serde(default)]
+    pub active_bg: Option<String>,
+    /// Цвет текста активного элемента.
+    #[serde(default)]
+    pub active_fg: Option<String>,
+    /// Список модулей. Порядок не важен — модули группируются по position.
+    #[serde(default)]
+    pub modules: Vec<BarModuleCfg>,
+    /// Показывать ли разделитель между модулями.
+    #[serde(default)]
+    pub separators: bool,
+    /// Символ-разделитель между модулями.
+    #[serde(default = "default_bar_separator")]
+    pub separator: String,
+}
+
+fn default_bar_position() -> String { "bottom".into() }
+fn default_bar_height() -> u32 { 24 }
+fn default_bar_separator() -> String { " | ".into() }
+
+impl Default for BarCfg {
+    fn default() -> Self {
+        BarCfg {
+            enabled: true,
+            position: "bottom".into(),
+            height: 24,
+            bg: None,
+            fg: None,
+            active_bg: None,
+            active_fg: None,
+            modules: vec![
+                BarModuleCfg {
+                    name: "ws".into(),
+                    type_: "workspaces".into(),
+                    position: "left".into(),
+                    format: "{n}:{name}".into(),
+                    color: None,
+                    refresh_ms: 0,
+                    cmd: None,
+                    args: None,
+                    max_len: None,
+                },
+                BarModuleCfg {
+                    name: "clock".into(),
+                    type_: "clock".into(),
+                    position: "right".into(),
+                    format: "%H:%M".into(),
+                    color: None,
+                    refresh_ms: 1000,
+                    cmd: None,
+                    args: None,
+                    max_len: None,
+                },
+            ],
+            separators: false,
+            separator: " | ".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BarModuleCfg {
+    /// Имя модуля (для идентификации в логах, должно быть уникальным).
+    pub name: String,
+    /// Тип модуля: workspaces, clock, cpu, memory, battery, network, text, custom.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Позиция в bar: "left", "center", "right".
+    #[serde(default = "default_module_position")]
+    pub position: String,
+    /// Формат вывода.
+    /// - clock: strftime format (например "%H:%M:%S", "%Y-%m-%d %H:%M")
+    /// - workspaces: "{n}" (номер), "{name}" (имя), "{n}:{name}"
+    /// - cpu/memory/battery: "{percent}" (например "CPU {percent}%")
+    /// - network: "{iface}" (интерфейс), "{ip}" (IPv4)
+    /// - text: игнорируется, используется cmd как содержимое
+    /// - custom: format string для вывода stdout команды
+    #[serde(default = "default_module_format")]
+    pub format: String,
+    /// Цвет текста (hex). Пусто = bar.fg.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Интервал обновления в мс (для динамических модулей: cpu/memory/battery/
+    /// network/clock/custom). 0 = обновлять каждый кадр (не рекомендуется
+    /// для custom — запускает процесс).
+    #[serde(default = "default_module_refresh_ms")]
+    pub refresh_ms: u64,
+    /// Команда для custom-модуля (например "echo hello" или "acpi --battery").
+    /// Для text-модуля — просто статичный текст.
+    #[serde(default)]
+    pub cmd: Option<String>,
+    /// Аргументы для custom-модуля (если нужны).
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Максимальная длина вывода (обрезается с "..." если превышена).
+    #[serde(default)]
+    pub max_len: Option<usize>,
+}
+
+fn default_module_position() -> String { "left".into() }
+fn default_module_format() -> String { "{}".into() }
+fn default_module_refresh_ms() -> u64 { 1000 }
+
 impl Default for Config {
     fn default() -> Self {
         toml::from_str(Self::default_config_toml())
@@ -794,6 +937,7 @@ impl Default for Config {
                     live_reload: LiveReloadCfg::default(),
                     animations: AnimationsCfg::default(),
                     ipc: IpcCfg::default(),
+                    bar: BarCfg::default(),
                     _config_path: None,
                 }
             })

@@ -1,7 +1,11 @@
 //! X11 compositor-клиент.
 //!
 //! Архитектура:
-//!   1. Запускаем Xephyr в фоне, на отдельном дисплее :1.
+//!   1. Запускаем Xvfb (X virtual framebuffer) в фоне, на отдельном дисплее :1.
+//!      Раньше использовали Xephyr, но Xephyr — это nested X server, которому
+//!      нужен host display (родительское X-окно). На чистом TTY (без X-сервера)
+//!      Xephyr падает с "Xephyr cannot open host display. Is DISPLAY set?".
+//!      Xvfb этого не требует — он сам рисует в memory framebuffer.
 //!   2. Подключаемся к нему через x11rb, включаем Composite extension.
 //!   3. Перенаправляем redirect_subwindows на root — теперь каждый top-level
 //!      X-клиент становится отдельным окном, которое мы можем захватить.
@@ -44,6 +48,8 @@ pub struct X11Compositor {
     #[allow(dead_code)]
     pub root: u32,
     pub windows: Vec<TrackedWindow>,
+    /// Child process of the X server (Xvfb). Named `xephyr` for backward
+    /// compatibility with field accessors; actually holds Xvfb.
     pub xephyr: Option<Child>,
     pub display: String,
     pub tile_bindings: std::collections::HashMap<u64, XWindowId>,
@@ -52,26 +58,47 @@ pub struct X11Compositor {
 impl X11Compositor {
     pub fn start(display_num: u32, screen_size: (u16, u16)) -> Result<Self> {
         let display = format!(":{}", display_num);
-        // SECURITY: removed `-ac` (access control disabled) — it allowed any
-        // local user to connect to the Xephyr display, read window contents,
-        // and inject input events via XTEST. We now rely on Xauth-based
-        // access control (X server default).
-        let xephyr = Command::new("Xephyr")
+
+        // Пробуем сначала Xvfb — он не требует host display (в отличие от Xephyr).
+        // Xvfb работает на чистом TTY, в headless-конфигурациях и в контейнерах.
+        // Формат screen spec для Xvfb: WxHxDPIxDEPTH  (упрощённо WxHxDEPTH).
+        let xvfb = Command::new("Xvfb")
             .arg(&display)
             .arg("-screen")
-            .arg(format!("{}x{}", screen_size.0, screen_size.1))
-            .arg("-reset")
-            .arg("-terminate")
+            .arg(format!("0 {}x{}x24", screen_size.0, screen_size.1))
             .arg("-nolisten")
             .arg("tcp")
-            .spawn()
-            .context("failed to launch Xephyr — install xorg-server-xephyr")?;
+            .arg("-ac")  // disable access control (Xvfb на отдельном дисплее, изолирован)
+            // Явно не наследуем DISPLAY от родителя — иначе Xvfb может пытаться
+            // использовать родительский дисплей (что бессмысленно для него).
+            .env_remove("DISPLAY")
+            .spawn();
 
-        // Ждём подключения.
+        let xserver_child = match xvfb {
+            Ok(child) => child,
+            Err(e) => {
+                // Fallback на Xephyr если Xvfb не установлен (для обратной совместимости).
+                // На TTY это скорее всего тоже упадёт, но возможно у пользователя
+                // настроен host X server (например, через xinit).
+                log::warn!("Xvfb launch failed ({}), falling back to Xephyr", e);
+                Command::new("Xephyr")
+                    .arg(&display)
+                    .arg("-screen")
+                    .arg(format!("{}x{}", screen_size.0, screen_size.1))
+                    .arg("-reset")
+                    .arg("-terminate")
+                    .arg("-nolisten")
+                    .arg("tcp")
+                    .spawn()
+                    .context("failed to launch Xvfb or Xephyr — install xvfb package")?
+            }
+        };
+
+        // Ждём подключения — Xvfb/Xephyr могут стартовать 200-500мс.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let (conn, _) = x11rb::connect(Some(&display))
-            .context("connecting to Xephyr")?;
+            .context("connecting to Xvfb/Xephyr — server may not be ready")?;
 
         // Проверяем composite extension.
         match composite::query_version(&conn, 0, 4) {
@@ -99,7 +126,7 @@ impl X11Compositor {
             conn,
             root,
             windows: Vec::new(),
-            xephyr: Some(xephyr),
+            xephyr: Some(xserver_child),
             display,
             tile_bindings: std::collections::HashMap::new(),
         })

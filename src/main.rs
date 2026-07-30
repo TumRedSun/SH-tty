@@ -35,7 +35,7 @@ use layout::{Direction, FocusDir, LeafId, Rect, TileKind, border_color_for, work
 use render::{Canvas, Font, TextRenderer};
 use render::glitch::{AnimationManager, snapshot_workspace};
 use term::{Pty, VTerm};
-use ui::{Theme, Popup as PopupWidget, PixelFmt, Color};
+use ui::{Theme, Popup as PopupWidget, PixelFmt, Color, Bar};
 use input::{Keyboard, Key, KeyEvent};
 use config::window_rules::{WindowRuleEngine, PlacementCache, WindowInfo};
 use login::LoginScreen;
@@ -557,11 +557,18 @@ fn run_wm(
 
     // Popups.
     let mut popups: Vec<PopupWidget> = Vec::new();
-    popups.push(PopupWidget::info(
-        &format!("SUPERHOT TTY v0.5 — {} | Mod4+D launcher | Mod4+1..0 workspaces",
-            cfg.login.effective_title()),
-        canvas.width, canvas.height,
-    ));
+    // Раньше здесь показывался стартовый popup "SUPERHOT TTY v0.5 — ...".
+    // Он занимал верхнюю часть экрана 4 секунды и закрывал терминал.
+    // Убран по запросу — пользователю нужна чистая стартовая картинка.
+    // Если нужно показать сообщение об ошибке или важное уведомление,
+    // используйте IPC или action popup в keybindings.
+
+    // Status bar — полность настраиваемая (polybar/waybar-style).
+    // Читает конфиг из [bar] секции config.toml. Поддерживает модули:
+    // workspaces, clock, cpu, memory, battery, network, text, custom.
+    let mut status_bar = Bar::new(cfg.bar.clone(), &theme);
+    log::info!("status bar initialized: enabled={} position={} modules={}",
+        status_bar.enabled(), cfg.bar.position, cfg.bar.modules.len());
 
     let mut resize_mode = false;
     let mut pending_x11_tile: Option<LeafId> = None;
@@ -654,6 +661,11 @@ fn run_wm(
                     }
                     if diff.monitors_changed {
                         log::warn!("  → monitors changed — requires restart");
+                    }
+                    if diff.bar_changed {
+                        // Status bar поддерживает полный live-reload — пересоздаём.
+                        status_bar = Bar::new(new_cfg.bar.clone(), &current_theme);
+                        log::info!("  → bar reloaded ({} modules)", new_cfg.bar.modules.len());
                     }
                     current_cfg = new_cfg;
                 } else {
@@ -760,7 +772,21 @@ fn run_wm(
                     } else {
                         if let Some(focused_id) = workspaces.current_layout().focused {
                             if let Some(tile) = terminals.get_mut(&focused_id) {
-                                if let Some(ch) = key.as_char(keyboard.shift) {
+                                // Сначала пробуем специальные клавиши (стрелки, F-keys,
+                                // Home/End, PageUp/Down, Insert/Delete, Escape, Backspace).
+                                // to_pty_bytes учитывает DECCKM (app cursor keys mode),
+                                // который zsh/vim/htop включают через CSI ?1h.
+                                let app_cursor = tile.vterm.app_cursor_keys;
+                                let seq = key.to_pty_bytes(
+                                    app_cursor,
+                                    keyboard.shift,
+                                    keyboard.ctrl,
+                                    keyboard.alt,
+                                );
+                                if let Some(bytes) = seq {
+                                    let _ = tile.pty.write(&bytes);
+                                } else if let Some(ch) = key.as_char(keyboard.shift) {
+                                    // Обычный печатный символ.
                                     let mut buf = [0u8; 4];
                                     let s = ch.encode_utf8(&mut buf);
                                     let _ = tile.pty.write(s.as_bytes());
@@ -842,7 +868,8 @@ fn run_wm(
             let fw = font.width as i32;
             let fh = font.height as i32;
             let padding = current_cfg.general.outer_padding.max(0) as i32;
-            let status_h = current_cfg.general.status_bar_height as i32;
+            // Высота status bar из новой [bar] секции (полностью настраиваемой).
+            let status_h = status_bar.height() as i32;
             for (leaf_id, _kind, rect) in &tile_rects {
                 if let Some(tile) = terminals.get_mut(leaf_id) {
                     if tile.workspace != workspaces.current { continue; }
@@ -966,7 +993,7 @@ fn run_wm(
 
         // 6. Render.
         render_frame(&canvas, &font, &current_theme, &workspaces, &terminals, &x11, &popups,
-            &launcher, &current_cfg, mouse.as_ref(), hw_cursor.as_ref(), &animations);
+            &launcher, &current_cfg, mouse.as_ref(), hw_cursor.as_ref(), &animations, &mut status_bar);
 
         // 6.5 Tick animations (cleanup finished).
         animations.tick();
@@ -1114,14 +1141,15 @@ fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
 /// Рассчитывает размер терминала (cols × rows) для canvas с учётом конфига.
 ///
 /// Использует cfg.general.outer_padding вместо hardcoded 8, и
-/// cfg.general.status_bar_height вместо hardcoded font.height*2.
+/// cfg.bar.height вместо hardcoded font.height*2.
 /// Не накладывает произвольных лимитов на cols/rows — терминал будет
 /// занимать весь доступный размер tile, независимо от разрешения.
 ///
 /// Для маленьких экранов (VGA 640×480) возвращает минимум 1×1.
 fn calc_terminal_size(canvas: &Canvas, font: &Font, cfg: &Config) -> (u16, u16) {
     let padding = cfg.general.outer_padding.max(0) as i32;
-    let status_h = cfg.general.status_bar_height as i32;
+    // Высота status bar: 0 если bar disabled.
+    let status_h = if cfg.bar.enabled { cfg.bar.height as i32 } else { 0 };
     let fw = font.width as i32;
     let fh = font.height as i32;
     // Защита от деления на 0 — font width/height всегда > 0, но defensive.
@@ -1362,6 +1390,7 @@ fn render_frame(
     mouse: Option<&input::Mouse>,
     hw_cursor: Option<&drm::HardwareCursor>,
     animations: &AnimationManager,
+    status_bar: &mut Bar,
 ) {
     canvas.fill(theme.bg);
     let layout = workspaces.current_layout();
@@ -1432,8 +1461,8 @@ fn render_frame(
         p.render_content(canvas, font, theme);
     }
 
-    // Status bar.
-    render_status_bar(canvas, font, theme, workspaces, cfg);
+    // Status bar — polybar/waybar-style, configured via [bar] in config.toml.
+    status_bar.render(canvas, font, theme, workspaces);
 
     // === Animations (рисуются поверх) ===
     animations.render(canvas, font, &cfg.animations, theme.accent_cyan);
@@ -1506,32 +1535,6 @@ fn render_x11_window(canvas: &Canvas, backing: &[u32], src_w: u16, src_h: u16, r
         }
     }
     canvas.blit_argb(rect.x, rect.y, &scaled, dst_w as u32, dst_h as u32);
-}
-
-fn render_status_bar(canvas: &Canvas, font: &Font, theme: &Theme, workspaces: &Workspaces, cfg: &Config) {
-    let h = cfg.general.status_bar_height;
-    let y = canvas.height as i32 - h as i32;
-    canvas.fill_rect(0, y, canvas.width, h, Color(0x05, 0x03, 0x10));
-
-    let text_renderer = TextRenderer::new(canvas, font);
-    let mut x = 4;
-
-    for n in 1..=workspaces.max {
-        let name = workspaces.names.get(&n).cloned().unwrap_or_else(|| n.to_string());
-        let is_current = workspaces.current == n;
-        let label = format!(" {}:{}", n % 10, name);
-        let color = if is_current { theme.accent_magenta } else { theme.fg_dim };
-        if is_current {
-            canvas.fill_rect(x, y + 2, (label.len() as u32) * font.width, font.height as u32,
-                Color(0x20, 0x10, 0x40));
-        }
-        text_renderer.draw_text(x, y + 4, &label, color, None);
-        x += (label.len() as i32 + 1) * font.width as i32;
-    }
-
-    let hint = format!("| tiles:{} | Mod4+D launcher | Mod4+1..0 ws | Mod4+Enter term | Mod4+R resize",
-        workspaces.current_layout().all_leaf_ids().len());
-    text_renderer.draw_text(x + 12, y + 4, &hint, theme.fg_default, None);
 }
 
 fn build_theme(cfg: &Config) -> Theme {

@@ -296,6 +296,27 @@ fn keycode_to_key(code: u16) -> Key {
         47 => Key::Char('v'), 48 => Key::Char('b'), 49 => Key::Char('n'),
         50 => Key::Char('m'),
         51 => Key::Char(','), 52 => Key::Char('.'), 53 => Key::Char('/'),
+        // Numpad keys with NumLock ON (produce digits/operators).
+        // Without NumLock they map to navigation keys (Home/End/Arrows/PgUp/PgDn/Insert/Delete).
+        // We send them as chars by default; if application keypad mode is on, the
+        // application should handle them appropriately. This at least makes the
+        // numpad usable for typing numbers (was previously dead — Key::Other).
+        71 => Key::Char('7'),  // KP7
+        72 => Key::Char('8'),  // KP8
+        73 => Key::Char('9'),  // KP9
+        74 => Key::Char('-'),  // KP_MINUS
+        75 => Key::Char('4'),  // KP4
+        76 => Key::Char('5'),  // KP5
+        77 => Key::Char('6'),  // KP6
+        78 => Key::Char('+'),  // KP_PLUS
+        79 => Key::Char('1'),  // KP1
+        80 => Key::Char('2'),  // KP2
+        81 => Key::Char('3'),  // KP3
+        82 => Key::Char('0'),  // KP0
+        83 => Key::Char('.'),  // KP_DOT
+        96 => Key::Enter,      // KP_ENTER — behaves like Enter
+        // CapsLock / NumLock / ScrollLock — modifier toggles, no char output.
+        58 | 69 | 70 => Key::Other(code),
         _ => Key::Other(code),
     }
 }
@@ -320,9 +341,135 @@ impl Key {
                 }
             }
             Key::Space => Some(' '),
-            Key::Enter => Some('\n'),
+            Key::Enter => Some('\r'),
             Key::Tab => Some('\t'),
-            Key::Backspace => Some('\x08'),
+            Key::Backspace => Some('\x7f'),
+            _ => None,
+        }
+    }
+
+    /// Возвращает ANSI escape-последовательность для специальных клавиш
+    /// (стрелки, F1-F12, Home/End, PageUp/Down, Insert/Delete, Escape, Backspace).
+    ///
+    /// Учитывает режим cursor keys (DECCKM): если `app_cursor_keys = true`
+    /// (zsh/vim включил CSI ?1h), стрелки отправляются как `ESC O A` вместо
+    /// `ESC [ A`. Без этого zsh line editor (и многие TUI) не понимают стрелки.
+    ///
+    /// Учитывает модификаторы (Shift/Ctrl/Alt) — добавляет modifier parameter
+    /// (например Shift+Up = `ESC [ 1 ; 2 A`). Это нужно для правильной работы
+    /// в современных терминалах, где Shift+Arrow прокручивает scrollback и т.д.
+    ///
+    /// Возвращает None для обычных печатных символов — caller должен использовать
+    /// as_char() для них.
+    pub fn to_pty_bytes(&self, app_cursor_keys: bool, shift: bool, ctrl: bool, alt: bool) -> Option<Vec<u8>> {
+        // Modifier parameter for xterm-style modifier-aware sequences.
+        // 1 = none, 2 = shift, 3 = alt, 4 = shift+alt, 5 = ctrl,
+        // 6 = shift+ctrl, 7 = alt+ctrl, 8 = shift+alt+ctrl.
+        let mod_param: u8 = {
+            let mut m = 1u8;
+            if shift { m += 1; }
+            if alt   { m += 2; }
+            if ctrl  { m += 4; }
+            m
+        };
+        let has_modifier = mod_param != 1;
+
+        // Helper: builds a CSI sequence respecting modifier + cursor mode.
+        // normal_seq = e.g. "A" (Up) — produces "\x1B[A" or "\x1B[1;2A" (with mods)
+        // app_seq    = e.g. "A" (Up) — produces "\x1BOA" (DECCKM mode, no mods only)
+        let build_csi = |normal_final: &str, app_final: &str| -> Vec<u8> {
+            if has_modifier {
+                // xterm modifier-aware: ESC [ 1 ; <mod> <final>
+                format!("\x1B[1;{}{}", mod_param, normal_final).into_bytes()
+            } else if app_cursor_keys {
+                format!("\x1BO{}", app_final).into_bytes()
+            } else {
+                format!("\x1B[{}", normal_final).into_bytes()
+            }
+        };
+
+        match self {
+            // Arrow keys — respect DECCKM.
+            Key::Up    => Some(build_csi("A", "A")),
+            Key::Down  => Some(build_csi("B", "B")),
+            Key::Right => Some(build_csi("C", "C")),
+            Key::Left  => Some(build_csi("D", "D")),
+            // Home/End — respect DECCKM too (DECCKM covers Home/End in some terminals).
+            Key::Home  => Some(build_csi("H", "H")),
+            Key::End   => Some(build_csi("F", "F")),
+            // F1-F4 — xterm uses ESC O P/Q/R/S in normal mode, ESC [ 1 ; <mod> P.. in mod mode.
+            Key::F1 => {
+                Some(if has_modifier { format!("\x1B[1;{}P", mod_param).into_bytes() }
+                     else { b"\x1BOP".to_vec() })
+            }
+            Key::F2 => {
+                Some(if has_modifier { format!("\x1B[1;{}Q", mod_param).into_bytes() }
+                     else { b"\x1BOQ".to_vec() })
+            }
+            Key::F3 => {
+                Some(if has_modifier { format!("\x1B[1;{}R", mod_param).into_bytes() }
+                     else { b"\x1BOR".to_vec() })
+            }
+            Key::F4 => {
+                Some(if has_modifier { format!("\x1B[1;{}S", mod_param).into_bytes() }
+                     else { b"\x1BOS".to_vec() })
+            }
+            // F5-F12 — always CSI, with optional modifier.
+            Key::F5  => Some(if has_modifier { format!("\x1B[15;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[15~".to_vec() }),
+            Key::F6  => Some(if has_modifier { format!("\x1B[17;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[17~".to_vec() }),
+            Key::F7  => Some(if has_modifier { format!("\x1B[18;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[18~".to_vec() }),
+            Key::F8  => Some(if has_modifier { format!("\x1B[19;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[19~".to_vec() }),
+            Key::F9  => Some(if has_modifier { format!("\x1B[20;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[20~".to_vec() }),
+            Key::F10 => Some(if has_modifier { format!("\x1B[21;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[21~".to_vec() }),
+            Key::F11 => Some(if has_modifier { format!("\x1B[23;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[23~".to_vec() }),
+            Key::F12 => Some(if has_modifier { format!("\x1B[24;{}~", mod_param).into_bytes() }
+                             else { b"\x1B[24~".to_vec() }),
+            // PageUp/PageDown/Insert/Delete — CSI with tilde, mod-aware.
+            Key::PageUp    => Some(if has_modifier { format!("\x1B[5;{}~", mod_param).into_bytes() }
+                                   else { b"\x1B[5~".to_vec() }),
+            Key::PageDown  => Some(if has_modifier { format!("\x1B[6;{}~", mod_param).into_bytes() }
+                                   else { b"\x1B[6~".to_vec() }),
+            Key::Insert    => Some(if has_modifier { format!("\x1B[2;{}~", mod_param).into_bytes() }
+                                   else { b"\x1B[2~".to_vec() }),
+            Key::Delete    => Some(if has_modifier { format!("\x1B[3;{}~", mod_param).into_bytes() }
+                                   else { b"\x1B[3~".to_vec() }),
+            // Escape — single byte. With Alt modifier, prefix other chars with ESC,
+            // but for the Escape key itself we just send ESC.
+            Key::Escape    => Some(b"\x1B".to_vec()),
+            // Backspace — most modern shells expect DEL (0x7F), not BS (0x08).
+            // xterm sends DEL by default; VT220 with DECBKM sends BS.
+            // We use DEL which is what bash/zsh/readline expect.
+            Key::Backspace => Some(b"\x7f".to_vec()),
+            // Tab — Ctrl+I is the same byte, but explicit Tab sends HT.
+            Key::Tab       => Some(b"\t".to_vec()),
+            // Enter — CR (\r). Most shells accept this; LF is also OK but CR is standard.
+            Key::Enter     => Some(b"\r".to_vec()),
+            // Space — explicit Space key sends SP.
+            Key::Space     => Some(b" ".to_vec()),
+            // Printable chars — caller should use as_char().
+            // But we handle Alt+<printable> by prefixing with ESC (meta key, xterm-style).
+            Key::Char(c) => {
+                if alt {
+                    let mut buf = [0u8; 4];
+                    let s = c.encode_utf8(&mut buf);
+                    let mut v = Vec::with_capacity(s.len() + 1);
+                    v.push(0x1B); // ESC prefix for meta
+                    v.extend_from_slice(s.as_bytes());
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            // Unknown key — no sequence.
+            Key::Other(_) => None,
+            // Modifier keys alone — no sequence.
             _ => None,
         }
     }

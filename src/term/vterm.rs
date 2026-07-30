@@ -101,6 +101,15 @@ pub struct VTerm {
     pub dirty_top: u16,
     pub dirty_bottom: u16,
     pub title: String,
+    /// DECCKM (Cursor Keys Mode, CSI ?1h/l). When true, arrow keys send
+    /// `ESC O A` (application mode) instead of `ESC [ A` (normal mode).
+    /// zsh/vim/less enable this on startup; without it they don't recognize
+    /// arrow key presses.
+    pub app_cursor_keys: bool,
+    /// DECCKM-like flag for numeric keypad (CSI ?66h/l). When true, keypad
+    /// keys send application-mode sequences. Less commonly used but some
+    /// apps (vim) toggle it.
+    pub app_keypad: bool,
     /// libvterm backend (если доступен).
     libvterm: Option<crate::term::libvterm::LibVTermHandle>,
 }
@@ -132,6 +141,8 @@ impl VTerm {
             dirty_top: 0,
             dirty_bottom: rows.saturating_sub(1),
             title: String::new(),
+            app_cursor_keys: false,
+            app_keypad: false,
             libvterm,
         }
     }
@@ -490,6 +501,8 @@ impl VTerm {
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
         self.on_alt = false;
+        self.app_cursor_keys = false;
+        self.app_keypad = false;
         self.mark_dirty(0, self.rows.saturating_sub(1));
     }
 
@@ -607,8 +620,14 @@ impl VTerm {
             }
             25 => self.cursor_visible = set,
             7 => self.autowrap = set,
-            1 => { /* application cursor keys — игнорируем */ }
-            12 => { /* cursor blink — игнорируем */ }
+            // DECCKM — Cursor Keys Mode. When set, arrow keys send
+            // `ESC O A` (application) instead of `ESC [ A` (normal).
+            // This is REQUIRED for zsh's line editor (and many TUI apps
+            // like vim, less, htop) to recognize arrow keys.
+            1 => self.app_cursor_keys = set,
+            // DECPAM / DECPNM — Application Keypad Mode (numeric keypad).
+            66 => self.app_keypad = set,
+            12 => { /* cursor blink — игнорируем (rendered as solid block) */ }
             47 | 1047 => {
                 // Alternate screen (older variants).
                 self.on_alt = set;

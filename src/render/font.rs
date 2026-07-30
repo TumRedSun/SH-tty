@@ -5,7 +5,15 @@
 //!   2. /usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz  (Arch default)
 //!   3. /usr/share/consolefonts/Lat2-Terminus16.psfu.gz      (Debian/Fedora)
 //! Если ничего не найдено — используется процедурный встроенный шрифт 8x16.
+//!
+//! ВАЖНО: PSF2-шрифты с unicode table (флаг PSF2_HAS_UNICODE_TABLE) содержат
+//! секцию после glyphs, которая маппит Unicode codepoints на glyph indices.
+//! Раньше мы это игнорировали и трактовали codepoint как прямой индекс —
+//! из-за этого box-drawing chars (─ │ ┌ ┐ └ ┘, U+2500-U+257F) и Cyrillic
+//! (U+0400-U+04FF) рендерились как мусорные символы (выглядело как "e с ~").
+//! Теперь unicode table парсится в HashMap<u32, u32> для корректного lookup'а.
 
+use std::collections::HashMap;
 use std::fs;
 use anyhow::Context;
 
@@ -17,6 +25,11 @@ pub struct Font {
     pub bytes_per_glyph: u32,
     pub glyphs: Vec<u8>,
     pub has_unicode_table: bool,
+    /// Codepoint → glyph index. Empty if font has no unicode table.
+    /// Строится один раз при загрузке шрифта, используется в glyph_for().
+    /// Для шрифтов без unicode table остаётся пустой — glyph_for использует
+    /// legacy logic (cp < 0x80 → direct, иначе cp_to_index fallback).
+    unicode_map: HashMap<u32, u32>,
 }
 
 impl Font {
@@ -42,13 +55,24 @@ impl Font {
             anyhow::bail!("PSF2 truncated: need {} bytes, have {}", glyphs_end, data.len());
         }
         let glyphs = data[headersize as usize..glyphs_end].to_vec();
+        let has_unicode_table = flags & 0x01 != 0;
+
+        // Парсим unicode table если она есть. Без этого коды выше 0xFF
+        // (включая UTF-8 русские/box-drawing) будут трактоваться как прямой
+        // glyph index, что даёт мусор на экране.
+        let unicode_map = if has_unicode_table {
+            parse_psf2_unicode_table(&data[glyphs_end..], length)
+        } else {
+            HashMap::new()
+        };
 
         Ok(Font {
             width, height,
             glyph_count: length,
             bytes_per_glyph,
             glyphs,
-            has_unicode_table: flags & 0x01 != 0,
+            has_unicode_table,
+            unicode_map,
         })
     }
 
@@ -66,12 +90,19 @@ impl Font {
         let glyphs_len = (length * bytes_per_glyph) as usize;
         if data.len() < 4 + glyphs_len { anyhow::bail!("PSF1 truncated"); }
         let glyphs = data[4..4 + glyphs_len].to_vec();
+        let has_unicode_table = mode & 0x02 != 0;
+        let unicode_map = if has_unicode_table {
+            parse_psf1_unicode_table(&data[4 + glyphs_len..], length)
+        } else {
+            HashMap::new()
+        };
         Ok(Font {
             width, height,
             glyph_count: length,
             bytes_per_glyph,
             glyphs,
-            has_unicode_table: mode & 0x02 != 0,
+            has_unicode_table,
+            unicode_map,
         })
     }
 
@@ -96,12 +127,23 @@ impl Font {
             "/usr/share/consolefonts/Lat2-Terminus16.psf",
             "/usr/share/kbd/consolefonts/default8x16.psfu.gz",
             "/usr/share/kbd/consolefonts/default8x16.psf",
+            // Шрифты с большим Unicode покрытием — лучше рендерят box-drawing
+            // и кириллицу. Если доступны, предпочтительнее Lat2-Terminus16
+            // (который имеет всего 256 glyphs).
+            "/usr/share/kbd/consolefonts/ter-v16n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-v14n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniCox_14.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniCortex_14.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniFont-Terminus16.psfu.gz",
+            "/usr/share/kbd/consolefonts/Uni3-Terminus16.psfu.gz",
+            "/usr/share/kbd/consolefonts/sun12x22.psfu.gz",
         ];
         for path in CANDIDATES {
             if let Ok(data) = load_maybe_gz(path) {
                 if let Ok(f) = Self::from_bytes(&data) {
-                    log::info!("loaded font from {} ({}x{} glyphs={})",
-                        path, f.width, f.height, f.glyph_count);
+                    log::info!("loaded font from {} ({}x{} glyphs={} unicode_table={})",
+                        path, f.width, f.height, f.glyph_count, f.has_unicode_table);
                     return f;
                 }
             }
@@ -110,17 +152,36 @@ impl Font {
         Self::builtin_8x16()
     }
 
+    /// Возвращает bitmap глифа для codepoint `cp`.
+    /// Для шрифтов с unicode table — lookup через unicode_map.
+    /// Для шрифтов без unicode table — legacy logic (ASCII direct, Cyrillic hardcoded).
+    /// Для неизвестных codepoints — glyph для '?' (или последний glyph как fallback).
     pub fn glyph_for(&self, cp: u32) -> &[u8] {
-        if !self.has_unicode_table {
-            let idx = if cp < 0x80 { cp } else { self.cp_to_index(cp).unwrap_or(b'?' as u32) };
-            let idx = idx.min(self.glyph_count - 1);
-            let off = (idx * self.bytes_per_glyph) as usize;
-            &self.glyphs[off..off + self.bytes_per_glyph as usize]
+        let idx = if !self.unicode_map.is_empty() {
+            // Шрифт с unicode table — используем её для корректного lookup'а.
+            // Если codepoint не найден — fallback на '?'.
+            self.unicode_map.get(&cp).copied()
+                .or_else(|| if cp < 0x80 { Some(cp) } else { None })
+                .unwrap_or(b'?' as u32)
+                .min(self.glyph_count.saturating_sub(1))
+        } else if !self.has_unicode_table {
+            // Legacy: no unicode table — direct ASCII + hardcoded Cyrillic.
+            if cp < 0x80 {
+                cp
+            } else {
+                self.cp_to_index(cp).unwrap_or(b'?' as u32)
+            }.min(self.glyph_count.saturating_sub(1))
         } else {
-            let idx = (cp as usize).min(self.glyph_count as usize - 1) as u32;
-            let off = (idx * self.bytes_per_glyph) as usize;
-            &self.glyphs[off..off + self.bytes_per_glyph as usize]
+            // has_unicode_table = true но map пуста (parse failed) — fallback.
+            (cp as usize).min(self.glyph_count as usize - 1) as u32
+        };
+        let off = (idx * self.bytes_per_glyph) as usize;
+        let end = off + self.bytes_per_glyph as usize;
+        if end > self.glyphs.len() {
+            // Out of bounds — return empty glyph (avoids panic on malformed font).
+            return &self.glyphs[..(self.bytes_per_glyph as usize).min(self.glyphs.len())];
         }
+        &self.glyphs[off..end]
     }
 
     fn cp_to_index(&self, cp: u32) -> Option<u32> {
@@ -172,8 +233,146 @@ impl Font {
             bytes_per_glyph: 16,
             glyphs,
             has_unicode_table: false,
+            unicode_map: HashMap::new(),
         }
     }
+}
+
+/// Парсит PSF2 unicode table. Формат (после glyphs section):
+///   Для каждого glyph index 0..N, последовательность UTF-8 codepoints:
+///     - 0xFF: разделитель между glyph'ами (end of entry for current glyph).
+///     - 0xFE: разделитель между альтернативными последовательностями для
+///             одного glyph (combining chars). Игнорируем — берём только первую.
+///   Каждый codepoint кодируется как UTF-8 (1-4 bytes).
+///
+/// Возвращает HashMap<u32, u32> (codepoint → glyph index).
+/// Для combining sequences берём первый codepoint последовательности.
+fn parse_psf2_unicode_table(data: &[u8], glyph_count: u32) -> HashMap<u32, u32> {
+    let mut map: HashMap<u32, u32> = HashMap::new();
+    let mut pos = 0usize;
+    let mut glyph_idx = 0u32;
+
+    while pos < data.len() && glyph_idx < glyph_count {
+        // Начало entry для текущего glyph. Читаем codepoints до 0xFF/0xFE.
+        let mut first_cp: Option<u32> = None;
+        while pos < data.len() {
+            let b = data[pos];
+            if b == 0xFF {
+                // End of glyph entry.
+                pos += 1;
+                break;
+            }
+            if b == 0xFE {
+                // Separator between alternative sequences for the same glyph
+                // (combining chars). Skip the rest of this sequence.
+                // Advance until we hit 0xFF (end of glyph entry).
+                while pos < data.len() && data[pos] != 0xFF {
+                    pos += 1;
+                }
+                if pos < data.len() { pos += 1; } // skip 0xFF
+                break;
+            }
+            // Decode UTF-8 codepoint starting at `b`.
+            let (cp_opt, advance) = decode_utf8(&data[pos..]);
+            pos += advance;
+            if let Some(cp) = cp_opt {
+                if first_cp.is_none() {
+                    first_cp = Some(cp);
+                    // Only record the first codepoint for this glyph index.
+                    // Multiple codepoints mapping to the same glyph are
+                    // already covered (we'd just overwrite with same index).
+                    map.entry(cp).or_insert(glyph_idx);
+                }
+            }
+        }
+        // If we hit EOF without seeing 0xFF, glyph_idx is still incremented below.
+        let _ = first_cp; // silence unused warning if no codepoint was decoded
+        glyph_idx += 1;
+    }
+
+    log::debug!("PSF2 unicode table: {} codepoints mapped to {} glyphs",
+        map.len(), glyph_count);
+    map
+}
+
+/// Парсит PSF1 unicode table. Формат похож на PSF2:
+///   Для каждого glyph index 0..N, последовательность 16-bit Unicode codepoints
+///   (little-endian), завершающаяся 0xFFFF.
+///   0xFFFE — separator between alternative sequences (combining chars).
+fn parse_psf1_unicode_table(data: &[u8], glyph_count: u32) -> HashMap<u32, u32> {
+    let mut map: HashMap<u32, u32> = HashMap::new();
+    let mut pos = 0usize;
+    let mut glyph_idx = 0u32;
+
+    while pos + 1 < data.len() && glyph_idx < glyph_count {
+        let cp = u16::from_le_bytes([data[pos], data[pos + 1]]) as u32;
+        pos += 2;
+        if cp == 0xFFFF {
+            glyph_idx += 1;
+            continue;
+        }
+        if cp == 0xFFFE {
+            // Skip rest of alternatives for this glyph.
+            while pos + 1 < data.len() {
+                let v = u16::from_le_bytes([data[pos], data[pos + 1]]);
+                pos += 2;
+                if v == 0xFFFF { break; }
+            }
+            glyph_idx += 1;
+            continue;
+        }
+        // Map first codepoint of glyph → glyph index.
+        map.entry(cp).or_insert(glyph_idx);
+    }
+
+    log::debug!("PSF1 unicode table: {} codepoints mapped", map.len());
+    map
+}
+
+/// Декодирует один UTF-8 codepoint из начала slice. Возвращает (Some(cp), length)
+/// при успехе или (None, advance) при ошибке (advance = сколько байт пропустить).
+fn decode_utf8(data: &[u8]) -> (Option<u32>, usize) {
+    if data.is_empty() { return (None, 0); }
+    let b0 = data[0];
+    if b0 < 0x80 {
+        return (Some(b0 as u32), 1);
+    }
+    if b0 & 0xE0 == 0xC0 {
+        // 2-byte: 110xxxxx 10xxxxxx
+        if data.len() < 2 { return (None, data.len()); }
+        let b1 = data[1];
+        if b1 & 0xC0 != 0x80 { return (None, 1); }
+        let cp = ((b0 as u32 & 0x1F) << 6) | (b1 as u32 & 0x3F);
+        return (Some(cp), 2);
+    }
+    if b0 & 0xF0 == 0xE0 {
+        // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+        if data.len() < 3 { return (None, data.len()); }
+        let b1 = data[1];
+        let b2 = data[2];
+        if b1 & 0xC0 != 0x80 || b2 & 0xC0 != 0x80 { return (None, 1); }
+        let cp = ((b0 as u32 & 0x0F) << 12)
+               | ((b1 as u32 & 0x3F) << 6)
+               | (b2 as u32 & 0x3F);
+        return (Some(cp), 3);
+    }
+    if b0 & 0xF8 == 0xF0 {
+        // 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        if data.len() < 4 { return (None, data.len()); }
+        let b1 = data[1];
+        let b2 = data[2];
+        let b3 = data[3];
+        if b1 & 0xC0 != 0x80 || b2 & 0xC0 != 0x80 || b3 & 0xC0 != 0x80 {
+            return (None, 1);
+        }
+        let cp = ((b0 as u32 & 0x07) << 18)
+               | ((b1 as u32 & 0x3F) << 12)
+               | ((b2 as u32 & 0x3F) << 6)
+               | (b3 as u32 & 0x3F);
+        return (Some(cp), 4);
+    }
+    // Invalid lead byte.
+    (None, 1)
 }
 
 /// Загружает файл, возможно gzip-сжатый (с расширением .gz).
