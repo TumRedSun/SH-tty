@@ -135,7 +135,13 @@ echo_green "Installed /etc/SH-tty/config.toml (updated)"
 
 # Дизейблим стандартный getty на tty1.
 echo_blue "==> Disabling default getty on tty1..."
+# На случай если crash-loop protection ранее включил getty и дизейблил наш сервис —
+# принудительно возвращаемся в нормальное состояние.
+systemctl stop getty@tty1.service 2>/dev/null || true
 systemctl disable getty@tty1.service 2>/dev/null || true
+# Удаляем старый override.conf (если был) и создаём новый, который
+# превращает getty@tty1 в no-op (ExecStart=-/bin/false).
+rm -rf /etc/systemd/system/getty@tty1.service.d
 mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/override.conf <<'EOF'
 [Service]
@@ -143,13 +149,19 @@ ExecStart=
 ExecStart=-/bin/false
 EOF
 
-# Включаем наш unit.
+# Включаем наш unit (force — снимает previous disabled state).
 echo_blue "==> Enabling superhot-tty@tty1..."
 # Очищаем crash state file — если были предыдущие падения, не хотим
 # сразу попасть в crash loop detection при первом запуске после install.
 rm -f /run/superhot-tty-crashes
 systemctl daemon-reload
-systemctl enable superhot-tty@tty1.service
+# systemctl enable может вернуть ошибку если unit уже enabled — это ОК.
+# Используем --force чтобы переустановить symlink'и (полезно если что-то
+# было в неconsistente состоянии после crash-loop).
+systemctl enable superhot-tty@tty1.service 2>&1 || true
+# Reset failure state — иначе systemd может отказаться стартовать из-за
+# старых failed попыток (StartLimitHit).
+systemctl reset-failed superhot-tty@tty1.service 2>/dev/null || true
 
 # Kernel cmdline для DRM modeset.
 echo_blue "==> Checking kernel cmdline for DRM modeset..."

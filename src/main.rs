@@ -102,7 +102,40 @@ fn record_crash() {
 
 /// Восстанавливает getty на tty1 — удаляем override.conf который
 /// install.sh создал чтобы disable getty.
+///
+/// ВАЖНО: эта функция вызывается из crash-loop детекции. После её вызова
+/// юнит superhot-tty@tty1.service остаётся disabled в systemd database
+/// (это переживает ребут). Чтобы снова включить — нужно либо переустановить
+/// через install.sh, либо вручную:
+///   sudo systemctl enable superhot-tty@tty1
+///   sudo rm -rf /etc/systemd/system/getty@tty1.service.d
+///   sudo systemctl disable getty@tty1
+///   sudo systemctl daemon-reload
 fn restore_getty_tty1() {
+    // Логируем через systemd-cat чтобы сообщение точно попало в journal,
+    // даже если наш stdio уже сломан. stderr тоже используем на случай,
+    // если systemd-cat не установлен.
+    let msg = "superhot-tty: crash loop detected, falling back to getty. To retry: sudo rm /run/superhot-tty-crashes && sudo systemctl enable superhot-tty@tty1 && sudo systemctl restart superhot-tty@tty1";
+    eprintln!("============================================================");
+    eprintln!(" superhot-tty: CRASH LOOP DETECTED");
+    eprintln!(" Falling back to getty to prevent system lockout.");
+    eprintln!(" To retry:");
+    eprintln!("   sudo rm /run/superhot-tty-crashes");
+    eprintln!("   sudo systemctl enable superhot-tty@tty1");
+    eprintln!("   sudo systemctl restart superhot-tty@tty1");
+    eprintln!("============================================================");
+    let _ = std::process::Command::new("systemd-cat")
+        .args(["-t", "superhot-tty", "-p", "err"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(msg.as_bytes());
+            }
+            child.wait()
+        });
+
     let _ = std::fs::remove_file("/etc/systemd/system/getty@tty1.service.d/override.conf");
     let _ = std::fs::remove_dir("/etc/systemd/system/getty@tty1.service.d");
     let _ = std::process::Command::new("systemctl").args(["enable", "getty@tty1.service"]).output();
