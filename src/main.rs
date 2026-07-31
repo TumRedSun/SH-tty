@@ -126,6 +126,150 @@ extern "C" fn sigsegv_handler(_sig: libc::c_int) {
     }
 }
 
+// ============================================================================
+// VT (virtual terminal) management
+// ============================================================================
+//
+// Linux kernel имеет собственный text-mode console на каждом /dev/ttyN.
+// Когда наш WM запускается на tty1 (через systemd unit с TTYPath=/dev/tty1),
+// kernel ничего не знает про наш DRM framebuffer — он продолжает рисовать
+// text-mode cursor (мигающий белый блок) в позиции (0,0) и может выводить
+// printk() сообщения поверх нашего UI.
+//
+// Решение: переключить активный VT в graphics mode через ioctl(KDSETMODE,
+// KD_GRAPHICS). Это говорит kernel'у: "не рисуй ничего, этим VT занимается
+// userspace graphics application". Cursor исчезает, printk抑制ируется (на
+// этом VT).
+//
+// Дополнительно ставим VT_SETMODE с VT_PROCESS — это позволяет нам получать
+// сигналы когда пользователь пытается переключить VT (Ctrl+Alt+F2 и т.д.),
+// чтобы мы могли корректно освободить DRM master. Без этого kernel может
+// переключить VT под нами и наш framebuffer уйдёт с экрана.
+
+const KD_GRAPHICS: libc::c_int = 0x03;
+const KD_TEXT:    libc::c_int = 0x00;
+// linux/kd.h: KDSETMODE = 0x4B3A, KDGETMODE = 0x4B3B
+const KDSETMODE: libc::c_ulong = 0x4B3A;
+const VT_SETMODE: libc::c_ulong = 0x5602;
+const VT_PROCESS: libc::c_int = 0x01;
+
+#[repr(C)]
+struct VtMode {
+    mode: libc::c_uchar,   // VT_PROCESS or VT_AUTO
+    waitv: libc::c_uchar,  // not used in VT_PROCESS mode
+    relsig: libc::c_short, // signal to raise on release request
+    acqsig: libc::c_short, // signal to raise on acquisition
+    frsig: libc::c_short,  // unused (set to 0)
+}
+
+/// Переключает активный VT в graphics mode и регистрирует наш процесс
+/// как VT owner. Безопасно вызывать из root-контекста (только root или
+/// процесс с CAP_SYS_TTY_CONFIG может делать эти ioctls).
+///
+/// Идём по убыванию приоритета:
+///   1. stdin (fd 0) — systemd привязывает его к /dev/%I через TTYPath=
+///   2. /dev/tty0 — current foreground VT
+///   3. /dev/tty1 — наиболее вероятный VT для WM
+///
+/// Если ничего не открылось — логируем warning и продолжаем (WM будет
+/// работать, но с мигающим cursor'ом — это cosmetic проблема).
+fn switch_vt_to_graphics() {
+    let candidates: [(RawFd, &str); 3] = [
+        (0, "stdin"),
+        (-1, "/dev/tty0"),
+        (-1, "/dev/tty1"),
+    ];
+    for (mut fd, label) in candidates {
+        // Открываем файл если fd < 0.
+        let owned: Option<RawFd> = if fd < 0 {
+            let c = std::ffi::CString::new(label).unwrap();
+            let opened = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+            if opened < 0 { continue; }
+            fd = opened;
+            Some(opened)
+        } else {
+            None
+        };
+
+        // Проверяем что это действительно tty (isatty).
+        if unsafe { libc::isatty(fd) } == 0 {
+            if let Some(f) = owned { unsafe { libc::close(f); } }
+            continue;
+        }
+
+        // KDSETMODE → KD_GRAPHICS.
+        let ret = unsafe { libc::ioctl(fd, KDSETMODE, KD_GRAPHICS) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!("KDSETMODE(KD_GRAPHICS) on {} failed: {} — kernel VT cursor will keep blinking",
+                label, err);
+            if let Some(f) = owned { unsafe { libc::close(f); } }
+            continue;
+        }
+
+        // VT_SETMODE → VT_PROCESS: просим kernel слать нам SIGUSR1 когда
+        // пользователь хочет переключить VT (чтобы мы освободили DRM master),
+        // и SIGUSR2 когда VT снова активен (чтобы мы могли re-acquire).
+        // Сейчас мы не обрабатываем эти сигналы корректно (нет signal handler),
+        // но VT_PROCESS mode всё равно полезен — он запрещает kernel
+        // автоматически переключать VT, давая нам контроль.
+        let mode = VtMode {
+            mode: VT_PROCESS as libc::c_uchar,
+            waitv: 0,
+            relsig: libc::SIGUSR1 as libc::c_short,
+            acqsig: libc::SIGUSR2 as libc::c_short,
+            frsig: 0,
+        };
+        let ret = unsafe { libc::ioctl(fd, VT_SETMODE, &mode) };
+        if ret < 0 {
+            // Не критично — VT_AUTO тоже работает, просто kernel сам управляет.
+            log::debug!("VT_SETMODE(VT_PROCESS) on {} failed: {} — staying in VT_AUTO", label,
+                std::io::Error::last_os_error());
+        }
+
+        log::info!("switched VT {} to graphics mode (cursor hidden)", label);
+        if let Some(f) = owned { unsafe { libc::close(f); } }
+        return;
+    }
+    log::warn!("no VT available for KDSETMODE — kernel cursor will remain visible");
+}
+
+/// Восстанавливает text mode для активного VT. Вызывается при shutdown —
+/// иначе после выхода WM на tty1 останется чёрный экран без shell prompt,
+/// потому что kernel думает что VT всё ещё в graphics mode.
+fn restore_vt_to_text() {
+    let candidates: [(RawFd, &str); 3] = [
+        (0, "stdin"),
+        (-1, "/dev/tty0"),
+        (-1, "/dev/tty1"),
+    ];
+    for (mut fd, label) in candidates {
+        let owned: Option<RawFd> = if fd < 0 {
+            let c = std::ffi::CString::new(label).unwrap();
+            let opened = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+            if opened < 0 { continue; }
+            fd = opened;
+            Some(opened)
+        } else { None };
+
+        if unsafe { libc::isatty(fd) } == 0 {
+            if let Some(f) = owned { unsafe { libc::close(f); } }
+            continue;
+        }
+
+        let _ = unsafe { libc::ioctl(fd, KDSETMODE, KD_TEXT) };
+        // Возвращаем VT_AUTO — kernel снова сам управляет переключением.
+        let mode = VtMode {
+            mode: 0x00, // VT_AUTO
+            waitv: 0, relsig: 0, acqsig: 0, frsig: 0,
+        };
+        let _ = unsafe { libc::ioctl(fd, VT_SETMODE, &mode) };
+        log::info!("restored VT {} to text mode", label);
+        if let Some(f) = owned { unsafe { libc::close(f); } }
+        return;
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -158,6 +302,17 @@ fn main() -> Result<()> {
     log::info!("loading config...");
     let cfg_system = Config::load();
     log::info!("config loaded, initializing DRM backend...");
+
+    // Переключаем активный VT в graphics mode — это скрывает kernel VT cursor
+    // (мигающий белый блок в верхнем левом углу) и запрещает kernel text console
+    // рисовать что-либо поверх нашего framebuffer. Без этого на tty1 виден
+    // мигающий курсор kernel console, а любой printk() (например от wlan driver)
+    // залезает на наш UI.
+    //
+    // systemd запускает нас с StandardInput=tty и TTYPath=/dev/%I, поэтому
+    // stdin (fd 0) уже привязан к нужному VT. Если stdin — не tty (например,
+    // запускают вручную из shell), пробуем /dev/tty0.
+    switch_vt_to_graphics();
     let mut multi_backend = match MultiMonitorBackend::new(&cfg_system.monitors) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -395,6 +550,8 @@ fn main() -> Result<()> {
     )?;
 
     log::info!("superhot-tty shutting down");
+    // Возвращаем VT в text mode — иначе после выхода на tty1 будет чёрный экран.
+    restore_vt_to_text();
     Ok(())
 }
 

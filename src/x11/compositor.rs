@@ -61,11 +61,17 @@ impl X11Compositor {
 
         // Пробуем сначала Xvfb — он не требует host display (в отличие от Xephyr).
         // Xvfb работает на чистом TTY, в headless-конфигурациях и в контейнерах.
-        // Формат screen spec для Xvfb: WxHxDPIxDEPTH  (упрощённо WxHxDEPTH).
+        //
+        // ВАЖНО: `-screen scrn WxHxD` — это ТРИ отдельных argv значения.
+        // Раньше мы делали .arg(format!("0 {}x{}x24", w, h)) — это порождало
+        // ОДИН аргумент "0 1024x768x24" (с пробелом внутри), Xorg парсил его
+        // как scrn="0 1024x768x24", а следующий argv ("-nolisten") — как WxHxD,
+        // и падал с "Invalid screen configuration -nolisten for -screen 0".
         let xvfb = Command::new("Xvfb")
             .arg(&display)
             .arg("-screen")
-            .arg(format!("0 {}x{}x24", screen_size.0, screen_size.1))
+            .arg("0")
+            .arg(format!("{}x{}x24", screen_size.0, screen_size.1))
             .arg("-nolisten")
             .arg("tcp")
             .arg("-ac")  // disable access control (Xvfb на отдельном дисплее, изолирован)
@@ -94,11 +100,34 @@ impl X11Compositor {
             }
         };
 
-        // Ждём подключения — Xvfb/Xephyr могут стартовать 200-500мс.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let (conn, _) = x11rb::connect(Some(&display))
-            .context("connecting to Xvfb/Xephyr — server may not be ready")?;
+        // Ждём подключения — Xvfb может стартовать 200-1500мс в зависимости
+        // от нагрузки и от того, холодный ли cache. Делаем несколько попыток
+        // с экспоненциальным backoff вместо одной sleep+connect — иначе на
+        // медленных системах WM запускается без X11 и все X-клиенты падают
+        // с "can't open display".
+        let (conn, _) = {
+            let mut last_err = None;
+            let mut delay = std::time::Duration::from_millis(100);
+            let mut connected = None;
+            for attempt in 0..10u32 {
+                if attempt > 0 {
+                    std::thread::sleep(delay);
+                    delay = delay.saturating_mul(2).min(std::time::Duration::from_millis(800));
+                }
+                match x11rb::connect(Some(&display)) {
+                    Ok(c) => { connected = Some(c); break; }
+                    Err(e) => {
+                        log::debug!("X11 connect attempt {} failed: {}", attempt + 1, e);
+                        last_err = Some(e);
+                    }
+                }
+            }
+            match connected {
+                Some(c) => c,
+                None => return Err(anyhow::anyhow!("connecting to Xvfb/Xephyr — server may not be ready: {}",
+                    last_err.map(|e| e.to_string()).unwrap_or_default())),
+            }
+        };
 
         // Проверяем composite extension.
         match composite::query_version(&conn, 0, 4) {

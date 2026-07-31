@@ -204,9 +204,17 @@ impl Drop for Keyboard {
 fn open_device_rw(path: &str) -> std::io::Result<RawFd> {
     let c_path = std::ffi::CString::new(path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    // O_NONBLOCK критичен — без него read() на evdev fd блокирует до
+    // появления события. Раньше мы открывали без O_NONBLOCK, и main loop
+    // висел в keyboard.poll() до нажатия любой клавиши — из-за этого экран
+    // обновлялся только когда пользователь что-то нажимал.
+    // (O_RDWR нужен чтобы EVIOCGRAB и LED events работали.)
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if fd >= 0 { return Ok(fd); }
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    // Fallback на read-only если нет прав на запись (некоторые системы
+    // дают только read). С NONBLOCK это всё ещё безопасно — read() вернёт
+    // EAGAIN вместо блокировки.
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }

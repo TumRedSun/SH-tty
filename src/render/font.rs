@@ -117,37 +117,78 @@ impl Font {
     }
 
     /// Пробует стандартные пути и возвращает загруженный шрифт.
+    ///
+    /// Стратегия: сканируем ВСЕ кандидаты и выбираем шрифт с наибольшим
+    /// glyph_count (т.е. лучшим Unicode покрытием). Раньше мы просто брали
+    /// первый найденный — это был Lat2-Terminus16 (256 glyphs), который не
+    /// содержит Cyrillic (U+0410-U+044F), Greek, Powerline (U+E0A0-E0D4),
+    /// многих математических символов. Все неизвестные codepoints рендерятся
+    /// как '?', что приводило к "e → ?" и "btop symbols → ?".
+    ///
+    /// Шрифты с полным Unicode покрытием (терминус-variants, UniCox, Uni3,
+    /// sun12x22) обычно имеют 1000-6000 glyphs и корректно отображают и
+    /// кириллицу, и box-drawing, и Powerline symbols.
     pub fn load_default() -> Self {
         const CANDIDATES: &[&str] = &[
+            // User override — максимальный приоритет, не сравниваем с остальными.
             "/etc/superhot-tty/font.psfu",
             "/etc/superhot-tty/font.psf",
+            // Шрифты с большим Unicode покрытием — лучше рендерят box-drawing,
+            // кириллицу, Powerline symbols. Если доступны, предпочтительнее
+            // Lat2-Terminus16 (который имеет всего 256 glyphs).
+            "/usr/share/kbd/consolefonts/Uni3-Terminus16.psfu.gz",
+            "/usr/share/kbd/consolefonts/Uni3-Fixed16.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniCox_14.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniCortex_14.psfu.gz",
+            "/usr/share/kbd/consolefonts/UniFont-Terminus16.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-v16n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-v14n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
             "/usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz",
             "/usr/share/kbd/consolefonts/Lat2-Terminus16.psf",
             "/usr/share/consolefonts/Lat2-Terminus16.psfu.gz",
             "/usr/share/consolefonts/Lat2-Terminus16.psf",
             "/usr/share/kbd/consolefonts/default8x16.psfu.gz",
             "/usr/share/kbd/consolefonts/default8x16.psf",
-            // Шрифты с большим Unicode покрытием — лучше рендерят box-drawing
-            // и кириллицу. Если доступны, предпочтительнее Lat2-Terminus16
-            // (который имеет всего 256 glyphs).
-            "/usr/share/kbd/consolefonts/ter-v16n.psfu.gz",
-            "/usr/share/kbd/consolefonts/ter-v14n.psfu.gz",
-            "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
-            "/usr/share/kbd/consolefonts/UniCox_14.psfu.gz",
-            "/usr/share/kbd/consolefonts/UniCortex_14.psfu.gz",
-            "/usr/share/kbd/consolefonts/UniFont-Terminus16.psfu.gz",
-            "/usr/share/kbd/consolefonts/Uni3-Terminus16.psfu.gz",
             "/usr/share/kbd/consolefonts/sun12x22.psfu.gz",
         ];
-        for path in CANDIDATES {
-            if let Ok(data) = load_maybe_gz(path) {
-                if let Ok(f) = Self::from_bytes(&data) {
-                    log::info!("loaded font from {} ({}x{} glyphs={} unicode_table={})",
-                        path, f.width, f.height, f.glyph_count, f.has_unicode_table);
-                    return f;
-                }
+
+        // Сначала проверяем user override — если есть, используем без сравнения.
+        if let Some(path) = CANDIDATES.iter().take(2).find_map(|p| {
+            load_maybe_gz(p).ok().and_then(|data| Self::from_bytes(&data).ok().map(|f| (p, f)))
+        }) {
+            let (path, f) = path;
+            log::info!("loaded user font from {} ({}x{} glyphs={} unicode_table={})",
+                path, f.width, f.height, f.glyph_count, f.has_unicode_table);
+            return f;
+        }
+
+        // Сканируем системные шрифты и выбираем с наибольшим glyph_count.
+        let mut best: Option<(&str, Self)> = None;
+        for path in CANDIDATES.iter().skip(2) {
+            let Ok(data) = load_maybe_gz(path) else { continue };
+            let Ok(f) = Self::from_bytes(&data) else { continue };
+            // Prefer fonts with unicode_table (corректный lookup codepoint → glyph).
+            // Among fonts with same unicode_table status, prefer more glyphs.
+            let score = (f.has_unicode_table as u32, f.glyph_count);
+            let better = match &best {
+                None => true,
+                Some((_, b)) => (f.has_unicode_table as u32, f.glyph_count)
+                    > (b.has_unicode_table as u32, b.glyph_count),
+            };
+            log::debug!("font candidate {}: {}x{} glyphs={} unicode_table={} score={:?} best_so_far={}",
+                path, f.width, f.height, f.glyph_count, f.has_unicode_table, score, better);
+            if better {
+                best = Some((path, f));
             }
         }
+
+        if let Some((path, f)) = best {
+            log::info!("loaded font from {} ({}x{} glyphs={} unicode_table={})",
+                path, f.width, f.height, f.glyph_count, f.has_unicode_table);
+            return f;
+        }
+
         log::warn!("no system PSF font found, using builtin fallback 8x16");
         Self::builtin_8x16()
     }

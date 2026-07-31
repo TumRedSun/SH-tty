@@ -186,10 +186,14 @@ pub enum MouseEvent {
 }
 
 /// Открывает устройство на чтение/запись.
+///
+/// O_NONBLOCK обязателен — иначе read() блокирует до следующего события
+/// мыши, и если мышь не двигается, main loop висит. То же самое было с
+/// клавиатурой — см. keyboard::open_device_rw.
 fn open_device_rw(path: &str) -> std::io::Result<RawFd> {
     let c_path = std::ffi::CString::new(path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
