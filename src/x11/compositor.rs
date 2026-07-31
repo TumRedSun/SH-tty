@@ -59,6 +59,19 @@ impl X11Compositor {
     pub fn start(display_num: u32, screen_size: (u16, u16)) -> Result<Self> {
         let display = format!(":{}", display_num);
 
+        // Перед запуском Xvfb подготавливаем окружение:
+        //   1. Создаём /tmp/.X11-unix если нет (Xvfb как non-root не может создать
+        //      сам — пишет "_XSERVTransmkdir: ERROR: euid != 0" и fallback'ит на
+        //      abstract socket, что работает, но некоторые X-клиенты ищут только
+        //      /tmp/.X11-unix/X<N> и не находят его).
+        //   2. Убиваем leftover Xvfb с предыдущего краша (если WM упал, Xvfb
+        //      остаётся running на том же display — новый Xvfb не сможет bind).
+        //   3. Устанавливаем TMPDIR — xkbcomp пишет /tmp/server-<n>.xkm, в
+        //      PrivateTmp systemd namespace /tmp должен быть writable, но
+        //      на всякий случай указываем явно.
+        prepare_x11_env(display_num);
+        kill_leftover_xvfb(display_num);
+
         // Пробуем сначала Xvfb — он не требует host display (в отличие от Xephyr).
         // Xvfb работает на чистом TTY, в headless-конфигурациях и в контейнерах.
         //
@@ -109,7 +122,7 @@ impl X11Compositor {
             let mut last_err = None;
             let mut delay = std::time::Duration::from_millis(100);
             let mut connected = None;
-            for attempt in 0..10u32 {
+            for attempt in 0..15u32 {
                 if attempt > 0 {
                     std::thread::sleep(delay);
                     delay = delay.saturating_mul(2).min(std::time::Duration::from_millis(800));
@@ -334,5 +347,89 @@ impl X11Compositor {
 impl Drop for X11Compositor {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Подготавливает окружение для Xvfb:
+///   - Создаёт /tmp/.X11-unix (mode 1777) если не существует.
+///     Xvfb как non-root не может создать сам, и fallback на abstract socket
+///     работает не для всех X-клиентов.
+///   - Устанавливает TMPDIR в /tmp явно — xkbcomp пишет /tmp/server-<n>.xkm
+///     и иногда не находит /tmp если systemd PrivateTmp меняет namespace.
+fn prepare_x11_env(display_num: u32) {
+    use std::os::unix::fs::DirBuilderExt;
+    // /tmp/.X11-unix — стандартная директория для Unix-domain X сокетов.
+    let x11_unix = "/tmp/.X11-unix";
+    if !std::path::Path::new(x11_unix).exists() {
+        match std::fs::DirBuilder::new().mode(0o1777).create(x11_unix) {
+            Ok(_) => log::debug!("created {} (mode 1777)", x11_unix),
+            Err(e) => {
+                // Не критично — Xvfb fallback'ит на abstract socket.
+                log::debug!("could not create {} ({}): Xvfb will use abstract socket", x11_unix, e);
+            }
+        }
+    }
+    // Удаляем stale socket file если есть (от предыдущего краша Xvfb).
+    let sock = format!("/tmp/.X11-unix/X{}", display_num);
+    let _ = std::fs::remove_file(&sock);
+    // Также удаляем lock file.
+    let lock = format!("/tmp/.X{}-lock", display_num);
+    let _ = std::fs::remove_file(&lock);
+    // TMPDIR — xkbcomp пишет сюда.
+    if std::env::var("TMPDIR").is_err() {
+        std::env::set_var("TMPDIR", "/tmp");
+    }
+}
+
+/// Убивает leftover Xvfb с предыдущего запуска (если WM упал, Xvfb остаётся
+/// running на том же display — новый Xvfb не сможет bind).
+///
+/// Ищем процесс с argv содержит "Xvfb" и ":<display_num>".
+/// Используем /proc вместо pgrep (pgrep может быть не установлен).
+fn kill_leftover_xvfb(display_num: u32) {
+    let display_arg = format!(":{}", display_num);
+    let mut killed = 0u32;
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = match name.to_str() { Some(s) => s, None => continue };
+            let pid: u32 = match name_str.parse() { Ok(p) => p, Err(_) => continue };
+            if pid <= 1 { continue; } // never kill init
+            // Читаем cmdline.
+            let cmdline_path = format!("/proc/{}/cmdline", pid);
+            let cmdline = match std::fs::read(&cmdline_path) { Ok(c) => c, Err(_) => continue };
+            // cmdline — NUL-separated argv.
+            let argv: Vec<&str> = cmdline.split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| std::str::from_utf8(s).ok())
+                .collect();
+            // Ищем "Xvfb" в argv[0] и ":<n>" в любом argv.
+            let is_xvfb = argv.first().map(|s| {
+                let base = s.rsplit('/').next().unwrap_or(s);
+                base == "Xvfb"
+            }).unwrap_or(false);
+            if is_xvfb && argv.iter().any(|a| *a == display_arg) {
+                // SIGTERM first, then SIGKILL if still alive.
+                unsafe {
+                    if libc::kill(pid as i32, libc::SIGTERM) == 0 {
+                        killed += 1;
+                        log::info!("killing leftover Xvfb (pid={})", pid);
+                        // Ждём до 500мс пока процесс умрёт.
+                        for _ in 0..50 {
+                            if libc::kill(pid as i32, 0) != 0 { break; }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        // Если ещё жив — SIGKILL.
+                        if libc::kill(pid as i32, 0) == 0 {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                            log::warn!("Xvfb pid={} did not exit on SIGTERM, sent SIGKILL", pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if killed > 0 {
+        log::info!("killed {} leftover Xvfb process(es) on display :{}", killed, display_num);
     }
 }

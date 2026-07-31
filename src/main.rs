@@ -1781,6 +1781,10 @@ fn set_nonblocking(fd: RawFd) {
 
 /// Открывает xcb_connection_t для DRI3 FFI.
 /// Возвращает raw pointer (must not be freed by caller — uses static).
+///
+/// ВАЖНО: `xcb_connect` имеет сигнатуру `xcb_connect(const char *displayname, int *screenp)`.
+/// Раньше мы объявляли FFI с ОДНИМ аргументом, что оставляло register RSI с garbage.
+/// `xcb_connect` разыменовывал garbage pointer чтобы записать screen number — SIGSEGV.
 fn get_xcb_connection(display: &str) -> Result<*mut libc::c_void> {
     use libloading::Library;
     static XCB_LIB: std::sync::OnceLock<Option<Library>> = std::sync::OnceLock::new();
@@ -1788,12 +1792,24 @@ fn get_xcb_connection(display: &str) -> Result<*mut libc::c_void> {
         unsafe { Library::new("libxcb.so.1").ok() }
     }).as_ref().context("libxcb not available")?;
     unsafe {
-        let connect: unsafe extern "C" fn(*const libc::c_char) -> *mut libc::c_void =
+        // Правильная сигнатура: 2 аргумента. screenp = NULL → нас не интересует screen number.
+        let connect: unsafe extern "C" fn(*const libc::c_char, *mut libc::c_int) -> *mut libc::c_void =
             *lib.get(b"xcb_connect\0").context("xcb_connect not found")?;
-        let display_c = std::ffi::CString::new(display).unwrap();
-        let conn = connect(display_c.as_ptr());
+        // xcb_connection_has_error — проверяет, что connection валидный.
+        let has_error: unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int =
+            *lib.get(b"xcb_connection_has_error\0").context("xcb_connection_has_error not found")?;
+        let display_c = std::ffi::CString::new(display)
+            .map_err(|e| anyhow::anyhow!("display contains NUL: {}", e))?;
+        let conn = connect(display_c.as_ptr(), std::ptr::null_mut());
         if conn.is_null() {
             anyhow::bail!("xcb_connect returned null");
+        }
+        // Проверяем, что connection действительно валиден. xcb_connect на плохом display
+        // возвращает non-null, но connection в error state — любые операции на нём
+        // вернут NULL/garbage, что может привести к crash в DRI3.
+        let err = has_error(conn);
+        if err != 0 {
+            anyhow::bail!("xcb_connect to '{}' failed (error code {})", display, err);
         }
         Ok(conn)
     }

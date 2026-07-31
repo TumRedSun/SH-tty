@@ -22,24 +22,35 @@ use anyhow::{Context, Result};
 use std::os::unix::io::RawFd;
 use std::sync::OnceLock;
 
+/// Cookie types. В libxcb все *_cookie_t — это struct { unsigned int sequence; }
+/// размером 4 байта. Раньше мы объявляли их как `*mut c_void` (8 байт), что
+/// технически UB: на x86-64 это работает (callee читает только low 32 bits
+/// регистра), но на других архитектурах или с будущими компиляторами может
+/// сломаться. Правильно — использовать `#[repr(C)]` struct.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XcbCookie {
+    sequence: u32,
+}
+
 /// Динамически загруженные символы libxcb-dri3.
 struct Dri3Syms {
     /// xcb_dri3_query_version
-    query_version: unsafe extern "C" fn(c: *mut libc::c_void, maj: u32, min: u32) -> *mut libc::c_void,
+    query_version: unsafe extern "C" fn(c: *mut libc::c_void, maj: u32, min: u32) -> XcbCookie,
     /// xcb_dri3_query_version_reply
-    query_version_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: *mut libc::c_void, e: *mut *mut libc::c_void) -> *mut Dri3QueryVersionReply,
+    query_version_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: XcbCookie, e: *mut *mut libc::c_void) -> *mut Dri3QueryVersionReply,
     /// xcb_dri3_open
-    open: unsafe extern "C" fn(c: *mut libc::c_void, window: u32, provider: u32) -> *mut libc::c_void,
+    open: unsafe extern "C" fn(c: *mut libc::c_void, window: u32, provider: u32) -> XcbCookie,
     /// xcb_dri3_open_reply
-    open_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: *mut libc::c_void, e: *mut *mut libc::c_void) -> *mut Dri3OpenReply,
+    open_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: XcbCookie, e: *mut *mut libc::c_void) -> *mut Dri3OpenReply,
     /// xcb_dri3_buffer_from_pixmap
-    buffer_from_pixmap: unsafe extern "C" fn(c: *mut libc::c_void, pixmap: u32) -> *mut libc::c_void,
+    buffer_from_pixmap: unsafe extern "C" fn(c: *mut libc::c_void, pixmap: u32) -> XcbCookie,
     /// xcb_dri3_buffer_from_pixmap_reply
-    buffer_from_pixmap_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: *mut libc::c_void, e: *mut *mut libc::c_void) -> *mut Dri3BufferFromPixmapReply,
+    buffer_from_pixmap_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: XcbCookie, e: *mut *mut libc::c_void) -> *mut Dri3BufferFromPixmapReply,
     /// xcb_dri3_buffers_from_pixmap (DRI3 1.2+)
-    buffers_from_pixmap: unsafe extern "C" fn(c: *mut libc::c_void, pixmap: u32) -> *mut libc::c_void,
+    buffers_from_pixmap: unsafe extern "C" fn(c: *mut libc::c_void, pixmap: u32) -> XcbCookie,
     /// xcb_dri3_buffers_from_pixmap_reply
-    buffers_from_pixmap_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: *mut libc::c_void, e: *mut *mut libc::c_void) -> *mut Dri3BuffersFromPixmapReply,
+    buffers_from_pixmap_reply: unsafe extern "C" fn(c: *mut libc::c_void, cookie: XcbCookie, e: *mut *mut libc::c_void) -> *mut Dri3BuffersFromPixmapReply,
 }
 
 #[repr(C)]
@@ -155,7 +166,8 @@ pub fn query_version(xcb_conn: *mut libc::c_void) -> Result<Dri3Version> {
         let mut err: *mut libc::c_void = std::ptr::null_mut();
         let reply = (syms.query_version_reply)(xcb_conn, cookie, &mut err);
         if !err.is_null() || reply.is_null() {
-            anyhow::bail!("DRI3 query_version failed");
+            if !err.is_null() { libc::free(err); }
+            anyhow::bail!("DRI3 query_version failed (Xvfb/xdummy не поддерживает DRI3 — это нормально)");
         }
         let r = &*reply;
         let v = Dri3Version {
@@ -181,6 +193,7 @@ pub fn open_drm_fd(xcb_conn: *mut libc::c_void, window: u32) -> Result<RawFd> {
         let mut err: *mut libc::c_void = std::ptr::null_mut();
         let reply = (syms.open_reply)(xcb_conn, cookie, &mut err);
         if !err.is_null() || reply.is_null() {
+            if !err.is_null() { libc::free(err); }
             anyhow::bail!("DRI3 open failed");
         }
         let r = &*reply;
@@ -233,6 +246,7 @@ pub fn buffers_from_pixmap(xcb_conn: *mut libc::c_void, pixmap: u32) -> Result<D
         let mut err: *mut libc::c_void = std::ptr::null_mut();
         let reply = (syms.buffers_from_pixmap_reply)(xcb_conn, cookie, &mut err);
         if !err.is_null() || reply.is_null() {
+            if !err.is_null() { libc::free(err); }
             anyhow::bail!("DRI3 buffers_from_pixmap failed");
         }
         let r = &*reply;
@@ -277,6 +291,7 @@ pub fn buffer_from_pixmap(xcb_conn: *mut libc::c_void, pixmap: u32) -> Result<Dm
         let mut err: *mut libc::c_void = std::ptr::null_mut();
         let reply = (syms.buffer_from_pixmap_reply)(xcb_conn, cookie, &mut err);
         if !err.is_null() || reply.is_null() {
+            if !err.is_null() { libc::free(err); }
             anyhow::bail!("DRI3 buffer_from_pixmap failed");
         }
         let r = &*reply;
