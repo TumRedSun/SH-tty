@@ -11,6 +11,8 @@ BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  pkgconf-pkg-config
 BuildRequires:  pam-devel
+BuildRequires:  freetype-devel
+BuildRequires:  fontconfig-devel
 Requires:       systemd
 Requires:       kbd
 Requires:       zsh
@@ -20,6 +22,9 @@ Requires:       pipewire-pulse
 Requires:       wireplumber
 Requires:       xdg-desktop-portal
 Requires:       pam
+Requires:       freetype
+Requires:       fontconfig
+Requires:       dejavu-sans-mono-fonts
 Recommends:     SDL2-devel
 Recommends:     xdg-desktop-portal-gtk
 

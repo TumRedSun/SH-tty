@@ -11,6 +11,9 @@ depends=(
     'kbd'
     'zsh'
     'pam'
+    'freetype2'
+    'fontconfig'
+    'ttf-dejavu'
 )
 optdepends=(
     'xorg-server-xvfb: X11 tile embedding (preferred, works on pure TTY)'

@@ -68,7 +68,11 @@ DEPS=(
     wireplumber
     # Portal для screen share:
     xdg-desktop-portal
-    # Шрифты:
+    # Шрифты: freetype + fontconfig для TTF рендеринга (через fc-match находит
+    # системный monospace TTF — DejaVu Sans Mono, JetBrains Mono, etc.).
+    # kbd — для PSF fallback если TTF недоступен.
+    freetype2
+    fontconfig
     kbd
     # zsh по умолчанию:
     zsh

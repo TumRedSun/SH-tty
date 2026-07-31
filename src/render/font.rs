@@ -1,14 +1,46 @@
-//! PSF (PC Screen Font) loader — загрузка шрифта для рендеринга терминала.
+//! PSF (PC Screen Font) + TTF font loader — загрузка шрифта для рендеринга терминала.
 //!
-//! Поддерживаются PSF1 и PSF2. Шрифт ищется в:
-//!   1. /etc/superhot-tty/font.psfu (переопределение пользователя — приоритет)
-//!   2. Динамическое сканирование /usr/share/kbd/consolefonts/,
-//!      /usr/share/consolefonts/, /usr/lib/kbd/consolefonts/ — ВСЕ .psfu* файлы.
-//!      Scoring по покрытию: Cyrillic > box-drawing > blocks > Greek > Powerline.
-//!   3. Если ничего не найдено — процедурный встроенный шрифт 8x16.
+//! ## Стратегия загрузки (v3)
 //!
-//! Рекомендуемый шрифт для русского языка: `ter-u16n.psfu.gz` из пакета
-//! `terminus-font` (Arch) / `fonts-terminus` (Debian).
+//! 1. **TTF через freetype** (основной путь):
+//!    - WM находит системный monospace TTF через `fc-match monospace:spacing=100`
+//!    - Через freetype пререндерит все codepoints из диапазона 0..=0xFFFF (BMP)
+//!      в PSF-совместимую bitmap структуру (1 bit per pixel, packed).
+//!    - Даёт полное Unicode покрытие: Cyrillic, Greek, CJK (если в шрифте),
+//!      math symbols, box-drawing, Powerline symbols.
+//!    - Типичный TTF (DejaVu Sans Mono) имеет ~3000 glyphs против 256-1000 у PSF.
+//!
+//! 2. **PSF fallback** — если freetype недоступен или TTF не найден:
+//!    - Динамическое сканирование /usr/share/kbd/consolefonts/ и т.д.
+//!    - Scoring по покрытию: Cyrillic > box-drawing > blocks > Greek > Powerline.
+//!
+//! 3. **User override** — файл в /etc/superhot-tty/:
+//!    - `font.ttf` / `font.otf` — TTF через freetype
+//!    - `font.psfu` / `font.psf` — PSF bitmap
+//!
+//! Если ничего не найдено — процедурный встроенный шрифт 8x16 (ASCII only).
+//!
+//! ## Зачем TTF вместо PSF
+//!
+//! PSF шрифты — bitmap шрифты фиксированного размера, ограничены 256-1024 glyphs.
+//! Даже ter-u16n.psfu.gz (terminus-font) не покрывает многие Unicode диапазоны:
+//!   - Нет emoji
+//!   - Нет Nerd Font иконок
+//!   - Ограниченный набор математических символов
+//!   - Нет CJK (китайские/японские/корейские)
+//!
+//! TTF шрифты через freetype:
+//!   - Поддерживают любой Unicode codepoint, который есть в шрифте
+//!   - Hinting для лучшей читаемости
+//!   - Любой размер (8px-32px)
+//!   - Используют системные TTF (DejaVu, JetBrains Mono, Source Code Pro, etc.)
+//!
+//! ## Рекомендуемые TTF пакеты
+//!
+//!   Arch:    sudo pacman -S ttf-dejavu ttf-liberation
+//!            sudo pacman -S ttf-jetbrains-mono ttf-nerd-fonts-symbols
+//!   Debian:  sudo apt install fonts-dejavu fonts-liberation
+//!   Fedora:  sudo dnf install dejavu-sans-mono-fonts
 //!
 //! ВАЖНО: PSF2-шрифты с unicode table (флаг PSF2_HAS_UNICODE_TABLE) содержат
 //! секцию после glyphs, которая маппит Unicode codepoints на glyph indices.
@@ -123,35 +155,44 @@ impl Font {
 
     /// Пробует стандартные пути и возвращает загруженный шрифт.
     ///
-    /// Стратегия (v2): динамически сканируем ВСЕ `.psfu*` файлы в стандартных
-    /// каталогах консольных шрифтов, а не только hardcoded paths. Это важно
-    /// потому что на разных дистрибутивах имена файлов отличаются:
-    ///   - Arch:      /usr/share/kbd/consolefonts/ter-u16n.psfu.gz  (terminus-font)
-    ///   - Debian:    /usr/share/consolefonts/Uni3-Terminus16.psfu.gz
-    ///   - Fedora:    /usr/lib/kbd/consolefonts/
+    /// Стратегия (v3): TTF через freetype → PSF fallback.
     ///
-    /// Затем scoring не просто по glyph_count (как раньше), а по coverage:
-    ///   1. Cyrillic (U+0410–U+044F, U+0401, U+0451)  — критично для русского
-    ///   2. Box-drawing (U+2500–U+257F)               — для btop, htop UI
-    ///   3. Block elements (U+2580–U+259F)             — для прогресс-баров
-    ///   4. Greek (U+0391–U+03C9)                      — математика
-    ///   5. Powerline symbols (U+E0A0–U+E0D4)          — для zsh/powerline
-    ///   6. has_unicode_table                          — корректный lookup
-    ///   7. glyph_count                                — tiebreaker
+    /// 1. TTF через freetype + fontconfig. WM находит системный monospace TTF
+    ///    (DejaVu Sans Mono, JetBrains Mono, etc.) через `fc-match` и пререндерит
+    ///    все BMP codepoints в PSF-совместимую структуру. Это даёт полное Unicode
+    ///    покрытие: Cyrillic, Greek, CJK (если в шрифте), math symbols, box-drawing.
+    ///    TTF предпочтительнее PSF — у TTF шрифтов обычно 2000-3000 glyphs против
+    ///    256-1000 у PSF.
     ///
-    /// Это исправляет баг, когда выбирался `Lat2-Terminus16.psfu.gz` (256 glyphs,
-    /// Latin-2 only, NO Cyrillic) — у него была unicode_table, поэтому он
-    /// побеждал старый scoring. Теперь его обходят шрифты с Cyrillic покрытием.
-    ///
-    /// Если ни один шрифт не содержит Cyrillic — логируем warning с инструкцией
-    /// установить `terminus-font` пакет.
+    /// 2. PSF fallback — если freetype недоступен или TTF не найден, используем
+    ///    динамическое сканирование каталогов консольных шрифтов (как в v2).
     pub fn load_default() -> Self {
-        // 1. User override — максимальный приоритет, без сравнения.
+        // 0. User override через /etc/superhot-tty/font.ttf — TTF файл.
+        // Если есть — используем freetype для рендеринга.
+        for user_path in ["/etc/superhot-tty/font.ttf", "/etc/superhot-tty/font.otf"] {
+            if std::path::Path::new(user_path).exists() {
+                match Self::from_ttf(user_path, 16) {
+                    Ok(f) => {
+                        log::info!(
+                            "loaded user TTF font from {} ({}x{} glyphs={} cyrillic={} box_drawing={})",
+                            user_path, f.width, f.height, f.glyph_count,
+                            f.has_cyrillic(), f.has_box_drawing()
+                        );
+                        return f;
+                    }
+                    Err(e) => {
+                        log::warn!("failed to load user TTF {}: {} — falling back", user_path, e);
+                    }
+                }
+            }
+        }
+
+        // 1. User override через /etc/superhot-tty/font.psfu — PSF файл (legacy).
         for user_path in ["/etc/superhot-tty/font.psfu", "/etc/superhot-tty/font.psf"] {
             if let Ok(data) = load_maybe_gz(user_path) {
                 if let Ok(f) = Self::from_bytes(&data) {
                     log::info!(
-                        "loaded user font from {} ({}x{} glyphs={} cyrillic={} box_drawing={})",
+                        "loaded user PSF font from {} ({}x{} glyphs={} cyrillic={} box_drawing={})",
                         user_path, f.width, f.height, f.glyph_count,
                         f.has_cyrillic(), f.has_box_drawing()
                     );
@@ -160,12 +201,43 @@ impl Font {
             }
         }
 
-        // 2. Собираем кандидатов из всех источников.
+        // 2. TTF через fontconfig — основной путь. Ищем системный monospace TTF.
+        match find_ttf_via_fontconfig() {
+            Some((path, family)) => {
+                log::info!("fontconfig selected TTF: {} ({})", path, family);
+                match Self::from_ttf(&path, 16) {
+                    Ok(f) => {
+                        log::info!(
+                            "loaded TTF font from {} ({}x{} glyphs={} cyrillic={} box_drawing={} greek={} powerline={})",
+                            path, f.width, f.height, f.glyph_count,
+                            f.has_cyrillic(), f.has_box_drawing(), f.has_greek(), f.has_powerline()
+                        );
+                        if !f.has_cyrillic() {
+                            log::warn!("TTF font does NOT contain Cyrillic — install a font with Cyrillic coverage");
+                            log::warn!("  Arch:    sudo pacman -S ttf-dejavu   (or any ttf-* package)");
+                        }
+                        return f;
+                    }
+                    Err(e) => {
+                        log::warn!("failed to load TTF {}: {} — falling back to PSF", path, e);
+                    }
+                }
+            }
+            None => {
+                log::warn!("fontconfig (fc-match) not available or returned nothing — falling back to PSF");
+            }
+        }
+
+        // 3. PSF fallback — dynamic scan of console font directories.
+        Self::load_psf_fallback()
+    }
+
+    /// PSF fallback: динамическое сканирование каталогов консольных шрифтов.
+    /// Используется если TTF недоступен. Логика идентична v2 load_default().
+    fn load_psf_fallback() -> Self {
         let mut candidates: Vec<(PathBuf, Vec<u8>)> = Vec::new();
 
-        // 2a. Hardcoded high-priority paths (если существуют — пробуем первыми).
         const PRIORITY_PATHS: &[&str] = &[
-            // Шрифты с полным Unicode покрытием — лучшее качество.
             "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
             "/usr/share/kbd/consolefonts/ter-u20n.psfu.gz",
             "/usr/share/kbd/consolefonts/ter-u24n.psfu.gz",
@@ -183,9 +255,6 @@ impl Font {
             }
         }
 
-        // 2b. Динамическое сканирование стандартных каталогов.
-        // Это подхватит ЛЮБОЙ установленный шрифт — даже если его имени нет
-        // в hardcoded списке выше.
         const SCAN_DIRS: &[&str] = &[
             "/usr/share/kbd/consolefonts",
             "/usr/share/consolefonts",
@@ -197,13 +266,11 @@ impl Font {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
-                // Принимаем .psfu / .psfu.gz / .psf / .psf.gz
                 let is_psf = fname.ends_with(".psfu.gz")
                     || fname.ends_with(".psfu")
                     || fname.ends_with(".psf.gz")
                     || fname.ends_with(".psf");
                 if !is_psf { continue; }
-                // Не дублируем уже добавленные пути.
                 if candidates.iter().any(|(p, _)| p == &path) { continue; }
                 if let Ok(data) = load_maybe_gz(path.to_str().unwrap_or("")) {
                     candidates.push((path, data));
@@ -211,11 +278,8 @@ impl Font {
             }
         }
 
-        log::debug!("font scan: {} candidates found", candidates.len());
+        log::debug!("PSF fallback: {} candidates found", candidates.len());
 
-        // 3. Парсим и scoring. Score tuple сравнивается лексикографически:
-        //    (cyrillic, box_drawing, blocks, greek, powerline, has_unicode_table, glyph_count)
-        //    Шрифт с Cyrillic всегда побеждает шрифт без Cyrillic, и т.д.
         let mut best: Option<(PathBuf, Self, (u32, u32, u32, u32, u32, u32, u32))> = None;
         for (path, data) in &candidates {
             let Ok(f) = Self::from_bytes(data) else { continue };
@@ -229,7 +293,7 @@ impl Font {
                 f.glyph_count,
             );
             log::debug!(
-                "font candidate {}: {}x{} glyphs={} uni_table={} cyrillic={} box={} blk={} greek={} pwr={} score={:?}",
+                "PSF candidate {}: {}x{} glyphs={} uni_table={} cyrillic={} box={} blk={} greek={} pwr={} score={:?}",
                 path.display(), f.width, f.height, f.glyph_count, f.has_unicode_table,
                 f.has_cyrillic(), f.has_box_drawing(), f.has_block_elements(),
                 f.has_greek(), f.has_powerline(), score
@@ -246,12 +310,12 @@ impl Font {
         if let Some((path, f, score)) = best {
             let has_cyr = f.has_cyrillic();
             log::info!(
-                "loaded font from {} ({}x{} glyphs={} unicode_table={} cyrillic={} box_drawing={} greek={} powerline={} score={:?})",
+                "loaded PSF font from {} ({}x{} glyphs={} unicode_table={} cyrillic={} box_drawing={} greek={} powerline={} score={:?})",
                 path.display(), f.width, f.height, f.glyph_count, f.has_unicode_table,
                 f.has_cyrillic(), f.has_box_drawing(), f.has_greek(), f.has_powerline(), score
             );
             if !has_cyr {
-                log::warn!("loaded font does NOT contain Cyrillic glyphs — Russian text will render as '?'");
+                log::warn!("PSF font does NOT contain Cyrillic glyphs — Russian text will render as '?'");
                 log::warn!("install a Unicode-capable font package to fix:");
                 log::warn!("  Arch:    sudo pacman -S terminus-font   (provides ter-u16n.psfu.gz)");
                 log::warn!("  Debian:  sudo apt install fonts-terminus console-setup");
@@ -261,13 +325,185 @@ impl Font {
             return f;
         }
 
-        log::warn!("no system PSF font found in any standard directory");
-        log::warn!("install one of:");
-        log::warn!("  Arch:    sudo pacman -S kbd terminus-font");
-        log::warn!("  Debian:  sudo apt install kbd console-setup fonts-terminus");
-        log::warn!("  Fedora:  sudo dnf install kbd terminus-fonts-pcf");
-        log::warn!("using builtin fallback 8x16 (NO Cyrillic, NO box-drawing)");
+        log::warn!("no system PSF font found — using builtin fallback 8x16 (NO Cyrillic, NO box-drawing)");
         Self::builtin_8x16()
+    }
+
+    /// Загружает TTF/OTF шрифт через freetype и пререндерит все codepoints из
+    /// диапазона 0..=0xFFFF (BMP) в PSF-совместимую bitmap структуру.
+    ///
+    /// Это позволяет WM рендерить ЛЮБОЙ Unicode символ, который есть в шрифте —
+    /// кириллица, греческий, box-drawing, математические операторы, и т.д.
+    /// TTF предпочтительнее PSF — у TTF обычно 2000-3000+ glyphs против 256-1000
+    /// у PSF, плюс TTF поддерживает любые размеры и hinting.
+    ///
+    /// `pixel_height` — желаемая высота глифа в пикселях (16, 20, 24).
+    /// Ширина подбирается автоматически по advance width (для monospace это
+    /// одинаково для всех глифов).
+    pub fn from_ttf(path: &str, pixel_height: u32) -> anyhow::Result<Self> {
+        use freetype::Library;
+        use freetype::face::LoadFlag;
+
+        let lib = Library::init()
+            .context("freetype Library::init failed — is libfreetype installed?")?;
+        let face = lib.new_face(path, 0)
+            .with_context(|| format!("failed to open TTF face: {}", path))?;
+
+        // Set pixel size. Freetype uses 26.6 fixed point internally.
+        // set_char_size(width, height, h_res, v_res) — width=0 means auto.
+        let char_size = (pixel_height * 64) as isize;
+        face.set_char_size(0, char_size, 0, 0)
+            .with_context(|| format!("set_char_size({}px) failed for {}", pixel_height, path))?;
+
+        // Determine target glyph width from advance of common monospace chars.
+        // For monospace fonts, all chars have same advance.
+        let target_width = determine_ttf_width(&face);
+        let bytes_per_row = ((target_width + 7) / 8) as usize;
+        let bytes_per_glyph = bytes_per_row * pixel_height as usize;
+
+        log::debug!(
+            "TTF {}: target_width={}px height={}px bytes_per_glyph={}",
+            path, target_width, pixel_height, bytes_per_glyph
+        );
+
+        // Pre-allocate for full BMP (65536 codepoints).
+        // Total memory: 65536 * bytes_per_glyph (e.g., 65536 * 32 = 2MB for 16x16).
+        // Acceptable — startup cost is ~50-200ms for typical fonts with ~3000 glyphs.
+        let glyph_capacity = 0x10000usize;
+        let mut glyphs = vec![0u8; glyph_capacity * bytes_per_glyph];
+        let mut unicode_map: HashMap<u32, u32> = HashMap::new();
+        let mut max_idx: u32 = 0;
+        let mut rendered_count = 0u32;
+        let mut failed_count = 0u32;
+
+        // Iterate all BMP codepoints. For each:
+        //   - Try to load the glyph via freetype.
+        //   - If glyph exists (char_index != 0), render it as monochrome bitmap.
+        //   - Copy bitmap into PSF-packed format with proper vertical centering.
+        //   - Map codepoint → glyph index (direct: cp = idx for BMP).
+        for cp in 0u32..=0xFFFF {
+            // Fast path: check if char exists in font via get_char_index.
+            // This avoids the expensive load_char for undefined codepoints.
+            // get_char_index returns Option<u32> — None means char not in font.
+            if face.get_char_index(cp as usize).is_none() {
+                continue; // Codepoint not in font — leave as empty glyph (zeros).
+            }
+
+            // Load + render. MONOCHROME produces 1-bit-per-pixel packed bitmap
+            // (compatible with PSF format). RENDER forces rasterization.
+            let load_result = face.load_char(cp as usize, LoadFlag::RENDER | LoadFlag::MONOCHROME);
+            if load_result.is_err() {
+                failed_count += 1;
+                continue;
+            }
+
+            let glyph = face.glyph();
+            let bitmap = glyph.bitmap();
+            let bm_width = bitmap.width() as usize;
+            let bm_rows = bitmap.rows() as usize;
+            let bm_left = glyph.bitmap_left();
+            let bm_top = glyph.bitmap_top();
+            let buffer = bitmap.buffer();
+            let pitch = bitmap.pitch().unsigned_abs() as usize;
+
+            // Use codepoint as glyph index (direct mapping, since we have 65536 slots).
+            let idx = cp;
+            let glyph_off = idx as usize * bytes_per_glyph;
+            if glyph_off + bytes_per_glyph > glyphs.len() {
+                continue; // Shouldn't happen, but be safe.
+            }
+
+            // Empty glyph (e.g., space) — leave as zeros, but still map it.
+            if buffer.is_empty() || bm_width == 0 || bm_rows == 0 {
+                unicode_map.insert(cp, idx);
+                if idx > max_idx { max_idx = idx; }
+                rendered_count += 1;
+                continue;
+            }
+
+            // Vertical centering: align glyph baseline with cell baseline.
+            // For a cell of height H, baseline is typically at row H-3 (with
+            // 3px descent for chars like 'g', 'p', 'y').
+            let baseline = pixel_height as i32 - 3;
+            let y_offset = baseline - bm_top;
+
+            // Horizontal centering: place glyph at bm_left offset (already
+            // provided by freetype), but clamp to cell width.
+            let x_offset = bm_left.max(0).min(target_width as i32 - 1);
+
+            // Copy freetype's monochrome bitmap into our PSF-packed buffer.
+            // Both formats are 1bpp MSB-first, but freetype's pitch may be
+            // larger (padded to 32-bit) while PSF packs to byte boundaries.
+            for row in 0..bm_rows {
+                let target_row = row as i32 + y_offset;
+                if target_row < 0 || target_row >= pixel_height as i32 { continue; }
+                let src_row_off = row * pitch;
+                let dst_row_off = glyph_off + (target_row as usize) * bytes_per_row;
+                if dst_row_off + bytes_per_row > glyphs.len() { break; }
+
+                // Copy bits, respecting horizontal offset and cell width.
+                for col in 0..(bm_width as i32) {
+                    let target_col = col + x_offset;
+                    if target_col < 0 || target_col >= target_width as i32 { continue; }
+                    let src_byte_off = src_row_off + (col as usize) / 8;
+                    if src_byte_off >= buffer.len() { break; }
+                    let src_bit = 7 - ((col as usize) % 8);
+                    let set = (buffer[src_byte_off] >> src_bit) & 1 == 1;
+                    if set {
+                        let dst_byte_off = dst_row_off + (target_col as usize) / 8;
+                        let dst_bit = 7 - ((target_col as usize) % 8);
+                        if dst_byte_off < glyphs.len() {
+                            glyphs[dst_byte_off] |= 1 << dst_bit;
+                        }
+                    }
+                }
+            }
+
+            unicode_map.insert(cp, idx);
+            if idx > max_idx { max_idx = idx; }
+            rendered_count += 1;
+        }
+
+        // Ensure '?' (U+003F) is mapped — it's the fallback in glyph_for().
+        if !unicode_map.contains_key(&(b'?' as u32)) {
+            // Draw a simple '?' glyph manually if font doesn't have it.
+            // (Extremely unlikely for any real font, but be safe.)
+            let q_off = (b'?' as u32) as usize * bytes_per_glyph;
+            if q_off + bytes_per_glyph <= glyphs.len() {
+                // Top arc + descender — minimal '?' shape.
+                let mid = bytes_per_row / 2;
+                glyphs[q_off + 0 * bytes_per_row + mid] = 0x3C;
+                glyphs[q_off + 1 * bytes_per_row + mid] = 0x42;
+                glyphs[q_off + 2 * bytes_per_row + mid] = 0x02;
+                glyphs[q_off + 3 * bytes_per_row + mid] = 0x04;
+                glyphs[q_off + 4 * bytes_per_row + mid] = 0x08;
+                glyphs[q_off + 5 * bytes_per_row + mid] = 0x08;
+                glyphs[q_off + 7 * bytes_per_row + mid] = 0x08;
+            }
+            unicode_map.insert(b'?' as u32, b'?' as u32);
+            if (b'?' as u32) > max_idx { max_idx = b'?' as u32; }
+        }
+
+        log::info!(
+            "TTF rendered: {} glyphs ({} failed) from {}, max_idx={}, cell={}x{}, mem={}KB",
+            rendered_count, failed_count, path, max_idx, target_width, pixel_height,
+            (glyphs.len() + 1023) / 1024
+        );
+
+        // Trim glyphs vec to actual used size to save memory.
+        // We keep slots 0..=max_idx, drop the rest.
+        let trimmed_len = (max_idx as usize + 1) * bytes_per_glyph;
+        glyphs.truncate(trimmed_len);
+
+        Ok(Font {
+            width: target_width,
+            height: pixel_height,
+            glyph_count: max_idx + 1,
+            bytes_per_glyph: bytes_per_glyph as u32,
+            glyphs,
+            has_unicode_table: true,
+            unicode_map,
+        })
     }
 
     /// Проверяет, покрывает ли шрифт базовый Cyrillic диапазон (U+0410–U+044F).
@@ -581,4 +817,86 @@ fn load_maybe_gz(path: &str) -> anyhow::Result<Vec<u8>> {
     }
 
     Ok(output.stdout)
+}
+
+/// Запрашивает fontconfig (`fc-match`) для поиска системного monospace TTF.
+///
+/// Команда: `fc-match -f "%{file}:%{family}\n" monospace:spacing=100`
+///   - `monospace` — запрашиваем семейство monospace
+///   - `spacing=100` — требуем strictly monospace (фиксированная ширина)
+///   - `%{file}` — путь к TTF файлу
+///   - `%{family}` — имя семейства (для логов)
+///
+/// Возвращает (path, family) или None если fc-match недоступен.
+fn find_ttf_via_fontconfig() -> Option<(String, String)> {
+    use std::process::Command;
+
+    let output = Command::new("fc-match")
+        .args(["-f", "%{file}\t%{family}", "monospace:spacing=100"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        log::debug!("fc-match failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    // Parse "path\tFamily Name" — split on first tab.
+    let (path, family) = match line.split_once('\t') {
+        Some((p, f)) => (p.to_string(), f.to_string()),
+        None => (line.to_string(), String::from("unknown")),
+    };
+
+    // Sanity check: file must exist and end with .ttf/.otf/.ttc
+    if !std::path::Path::new(&path).exists() {
+        log::warn!("fc-match returned non-existent path: {}", path);
+        return None;
+    }
+
+    let lower = path.to_lowercase();
+    if !lower.ends_with(".ttf") && !lower.ends_with(".otf") && !lower.ends_with(".ttc") {
+        log::warn!("fc-match returned non-TTF path: {} — skipping", path);
+        return None;
+    }
+
+    Some((path, family))
+}
+
+/// Определяет целевую ширину глифа для TTF шрифта по advance width
+/// нескольких репрезентативных символов. Для monospace шрифтов advance
+/// одинаков для всех глифов — берём максимум из тестовых символов.
+///
+/// Возвращает ширину в пикселях (8-16).
+fn determine_ttf_width(face: &freetype::Face) -> u32 {
+    use freetype::face::LoadFlag;
+
+    // Тестовые символы: латиница, кириллица (для проверки что шрифт не узкий).
+    let test_chars: &[u32] = &[
+        b'M' as u32, b'W' as u32, b'm' as u32, b'w' as u32,
+        b'@' as u32, b'#' as u32, b'8' as u32,
+        0x0410, // А (кириллица)
+        0x044F, // я
+    ];
+    let mut max_width: u32 = 8; // default for 16px height
+
+    for &cp in test_chars {
+        if face.load_char(cp as usize, LoadFlag::DEFAULT).is_err() { continue; }
+        let advance = face.glyph().advance().x;
+        if advance > 0 {
+            // Freetype advance is in 26.6 fixed point — shift right by 6 to get pixels.
+            let pixel_advance = (advance >> 6) as u32;
+            if pixel_advance > max_width {
+                max_width = pixel_advance;
+            }
+        }
+    }
+
+    // Cap at reasonable width to avoid huge cells for non-monospace fonts.
+    max_width.min(16).max(6)
 }

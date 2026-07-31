@@ -3,7 +3,7 @@ Version: 0.3.0-1
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: systemd, kbd, zsh, xvfb, pipewire, pipewire-pulse, wireplumber, xdg-desktop-portal, libpam0g
+Depends: systemd, kbd, zsh, xvfb, pipewire, pipewire-pulse, wireplumber, xdg-desktop-portal, libpam0g, libfreetype6, libfontconfig1, fonts-dejavu
 Recommends: xdg-desktop-portal-gtk
 Suggests: libsdl2-dev
 Maintainer: SuperHot TTY contributors

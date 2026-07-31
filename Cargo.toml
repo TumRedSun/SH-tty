@@ -80,6 +80,11 @@ xdg = "2.5"
 # Shmem for DRI3
 memmap2 = "0.9"
 
+# TTF font rendering via freetype (for full Unicode coverage: Cyrillic, Greek,
+# box-drawing, math symbols, etc.). Falls back to PSF bitmap fonts if freetype
+# is unavailable or no TTF font is found.
+freetype-rs = "0.38"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

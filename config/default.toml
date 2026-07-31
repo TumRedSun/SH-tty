@@ -19,11 +19,16 @@
 
 [general]
 shell = "zsh"
-# Имя шрифта — ищется в стандартных каталогах консольных шрифтов.
-# Для русского языка РЕКОМЕНДУЕТСЯ установить пакет `terminus-font` (Arch) или
-# `fonts-terminus` (Debian) и использовать "ter-u16n" (Unicode, full coverage).
-# "Lat2-Terminus16" — только Latin-2, НЕ содержит Cyrillic (русский → '?').
-font = "ter-u16n"
+# Имя шрифта — информационное поле. Реальный шрифт ищется через fontconfig:
+#   1. /etc/superhot-tty/font.ttf — пользовательский TTF (если есть)
+#   2. fc-match monospace:spacing=100 — системный monospace TTF (DejaVu Sans Mono,
+#      JetBrains Mono, Source Code Pro, etc.)
+#   3. PSF fallback (ter-u16n.psfu.gz и т.д.)
+# Для установки хорошего шрифта:
+#   Arch:    sudo pacman -S ttf-dejavu ttf-jetbrains-mono ttf-nerd-fonts-symbols
+#   Debian:  sudo apt install fonts-dejavu fonts-jetbrains-mono
+# Или скопируй любой .ttf в /etc/superhot-tty/font.ttf чтобы переопределить.
+font = "DejaVu Sans Mono"
 font_size = 16
 gap = 4
 border = 1
