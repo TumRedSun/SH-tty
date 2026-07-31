@@ -19,7 +19,11 @@
 
 [general]
 shell = "zsh"
-font = "Lat2-Terminus16"
+# Имя шрифта — ищется в стандартных каталогах консольных шрифтов.
+# Для русского языка РЕКОМЕНДУЕТСЯ установить пакет `terminus-font` (Arch) или
+# `fonts-terminus` (Debian) и использовать "ter-u16n" (Unicode, full coverage).
+# "Lat2-Terminus16" — только Latin-2, НЕ содержит Cyrillic (русский → '?').
+font = "ter-u16n"
 font_size = 16
 gap = 4
 border = 1

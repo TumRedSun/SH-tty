@@ -1,10 +1,14 @@
 //! PSF (PC Screen Font) loader — загрузка шрифта для рендеринга терминала.
 //!
 //! Поддерживаются PSF1 и PSF2. Шрифт ищется в:
-//!   1. /etc/superhot-tty/font.psfu (переопределение пользователя)
-//!   2. /usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz  (Arch default)
-//!   3. /usr/share/consolefonts/Lat2-Terminus16.psfu.gz      (Debian/Fedora)
-//! Если ничего не найдено — используется процедурный встроенный шрифт 8x16.
+//!   1. /etc/superhot-tty/font.psfu (переопределение пользователя — приоритет)
+//!   2. Динамическое сканирование /usr/share/kbd/consolefonts/,
+//!      /usr/share/consolefonts/, /usr/lib/kbd/consolefonts/ — ВСЕ .psfu* файлы.
+//!      Scoring по покрытию: Cyrillic > box-drawing > blocks > Greek > Powerline.
+//!   3. Если ничего не найдено — процедурный встроенный шрифт 8x16.
+//!
+//! Рекомендуемый шрифт для русского языка: `ter-u16n.psfu.gz` из пакета
+//! `terminus-font` (Arch) / `fonts-terminus` (Debian).
 //!
 //! ВАЖНО: PSF2-шрифты с unicode table (флаг PSF2_HAS_UNICODE_TABLE) содержат
 //! секцию после glyphs, которая маппит Unicode codepoints на glyph indices.
@@ -15,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use anyhow::Context;
 
 #[derive(Debug, Clone)]
@@ -118,79 +123,193 @@ impl Font {
 
     /// Пробует стандартные пути и возвращает загруженный шрифт.
     ///
-    /// Стратегия: сканируем ВСЕ кандидаты и выбираем шрифт с наибольшим
-    /// glyph_count (т.е. лучшим Unicode покрытием). Раньше мы просто брали
-    /// первый найденный — это был Lat2-Terminus16 (256 glyphs), который не
-    /// содержит Cyrillic (U+0410-U+044F), Greek, Powerline (U+E0A0-E0D4),
-    /// многих математических символов. Все неизвестные codepoints рендерятся
-    /// как '?', что приводило к "e → ?" и "btop symbols → ?".
+    /// Стратегия (v2): динамически сканируем ВСЕ `.psfu*` файлы в стандартных
+    /// каталогах консольных шрифтов, а не только hardcoded paths. Это важно
+    /// потому что на разных дистрибутивах имена файлов отличаются:
+    ///   - Arch:      /usr/share/kbd/consolefonts/ter-u16n.psfu.gz  (terminus-font)
+    ///   - Debian:    /usr/share/consolefonts/Uni3-Terminus16.psfu.gz
+    ///   - Fedora:    /usr/lib/kbd/consolefonts/
     ///
-    /// Шрифты с полным Unicode покрытием (терминус-variants, UniCox, Uni3,
-    /// sun12x22) обычно имеют 1000-6000 glyphs и корректно отображают и
-    /// кириллицу, и box-drawing, и Powerline symbols.
+    /// Затем scoring не просто по glyph_count (как раньше), а по coverage:
+    ///   1. Cyrillic (U+0410–U+044F, U+0401, U+0451)  — критично для русского
+    ///   2. Box-drawing (U+2500–U+257F)               — для btop, htop UI
+    ///   3. Block elements (U+2580–U+259F)             — для прогресс-баров
+    ///   4. Greek (U+0391–U+03C9)                      — математика
+    ///   5. Powerline symbols (U+E0A0–U+E0D4)          — для zsh/powerline
+    ///   6. has_unicode_table                          — корректный lookup
+    ///   7. glyph_count                                — tiebreaker
+    ///
+    /// Это исправляет баг, когда выбирался `Lat2-Terminus16.psfu.gz` (256 glyphs,
+    /// Latin-2 only, NO Cyrillic) — у него была unicode_table, поэтому он
+    /// побеждал старый scoring. Теперь его обходят шрифты с Cyrillic покрытием.
+    ///
+    /// Если ни один шрифт не содержит Cyrillic — логируем warning с инструкцией
+    /// установить `terminus-font` пакет.
     pub fn load_default() -> Self {
-        const CANDIDATES: &[&str] = &[
-            // User override — максимальный приоритет, не сравниваем с остальными.
-            "/etc/superhot-tty/font.psfu",
-            "/etc/superhot-tty/font.psf",
-            // Шрифты с большим Unicode покрытием — лучше рендерят box-drawing,
-            // кириллицу, Powerline symbols. Если доступны, предпочтительнее
-            // Lat2-Terminus16 (который имеет всего 256 glyphs).
+        // 1. User override — максимальный приоритет, без сравнения.
+        for user_path in ["/etc/superhot-tty/font.psfu", "/etc/superhot-tty/font.psf"] {
+            if let Ok(data) = load_maybe_gz(user_path) {
+                if let Ok(f) = Self::from_bytes(&data) {
+                    log::info!(
+                        "loaded user font from {} ({}x{} glyphs={} cyrillic={} box_drawing={})",
+                        user_path, f.width, f.height, f.glyph_count,
+                        f.has_cyrillic(), f.has_box_drawing()
+                    );
+                    return f;
+                }
+            }
+        }
+
+        // 2. Собираем кандидатов из всех источников.
+        let mut candidates: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+
+        // 2a. Hardcoded high-priority paths (если существуют — пробуем первыми).
+        const PRIORITY_PATHS: &[&str] = &[
+            // Шрифты с полным Unicode покрытием — лучшее качество.
+            "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u20n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u24n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u28n.psfu.gz",
+            "/usr/share/kbd/consolefonts/ter-u32n.psfu.gz",
             "/usr/share/kbd/consolefonts/Uni3-Terminus16.psfu.gz",
             "/usr/share/kbd/consolefonts/Uni3-Fixed16.psfu.gz",
             "/usr/share/kbd/consolefonts/UniCox_14.psfu.gz",
             "/usr/share/kbd/consolefonts/UniCortex_14.psfu.gz",
             "/usr/share/kbd/consolefonts/UniFont-Terminus16.psfu.gz",
-            "/usr/share/kbd/consolefonts/ter-v16n.psfu.gz",
-            "/usr/share/kbd/consolefonts/ter-v14n.psfu.gz",
-            "/usr/share/kbd/consolefonts/ter-u16n.psfu.gz",
-            "/usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz",
-            "/usr/share/kbd/consolefonts/Lat2-Terminus16.psf",
-            "/usr/share/consolefonts/Lat2-Terminus16.psfu.gz",
-            "/usr/share/consolefonts/Lat2-Terminus16.psf",
-            "/usr/share/kbd/consolefonts/default8x16.psfu.gz",
-            "/usr/share/kbd/consolefonts/default8x16.psf",
-            "/usr/share/kbd/consolefonts/sun12x22.psfu.gz",
         ];
-
-        // Сначала проверяем user override — если есть, используем без сравнения.
-        if let Some(path) = CANDIDATES.iter().take(2).find_map(|p| {
-            load_maybe_gz(p).ok().and_then(|data| Self::from_bytes(&data).ok().map(|f| (p, f)))
-        }) {
-            let (path, f) = path;
-            log::info!("loaded user font from {} ({}x{} glyphs={} unicode_table={})",
-                path, f.width, f.height, f.glyph_count, f.has_unicode_table);
-            return f;
-        }
-
-        // Сканируем системные шрифты и выбираем с наибольшим glyph_count.
-        let mut best: Option<(&str, Self)> = None;
-        for path in CANDIDATES.iter().skip(2) {
-            let Ok(data) = load_maybe_gz(path) else { continue };
-            let Ok(f) = Self::from_bytes(&data) else { continue };
-            // Prefer fonts with unicode_table (corректный lookup codepoint → glyph).
-            // Among fonts with same unicode_table status, prefer more glyphs.
-            let score = (f.has_unicode_table as u32, f.glyph_count);
-            let better = match &best {
-                None => true,
-                Some((_, b)) => (f.has_unicode_table as u32, f.glyph_count)
-                    > (b.has_unicode_table as u32, b.glyph_count),
-            };
-            log::debug!("font candidate {}: {}x{} glyphs={} unicode_table={} score={:?} best_so_far={}",
-                path, f.width, f.height, f.glyph_count, f.has_unicode_table, score, better);
-            if better {
-                best = Some((path, f));
+        for path in PRIORITY_PATHS {
+            if let Ok(data) = load_maybe_gz(path) {
+                candidates.push((PathBuf::from(path), data));
             }
         }
 
-        if let Some((path, f)) = best {
-            log::info!("loaded font from {} ({}x{} glyphs={} unicode_table={})",
-                path, f.width, f.height, f.glyph_count, f.has_unicode_table);
+        // 2b. Динамическое сканирование стандартных каталогов.
+        // Это подхватит ЛЮБОЙ установленный шрифт — даже если его имени нет
+        // в hardcoded списке выше.
+        const SCAN_DIRS: &[&str] = &[
+            "/usr/share/kbd/consolefonts",
+            "/usr/share/consolefonts",
+            "/usr/lib/kbd/consolefonts",
+            "/lib/kbd/consolefonts",
+        ];
+        for dir in SCAN_DIRS {
+            let Ok(entries) = fs::read_dir(dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                // Принимаем .psfu / .psfu.gz / .psf / .psf.gz
+                let is_psf = fname.ends_with(".psfu.gz")
+                    || fname.ends_with(".psfu")
+                    || fname.ends_with(".psf.gz")
+                    || fname.ends_with(".psf");
+                if !is_psf { continue; }
+                // Не дублируем уже добавленные пути.
+                if candidates.iter().any(|(p, _)| p == &path) { continue; }
+                if let Ok(data) = load_maybe_gz(path.to_str().unwrap_or("")) {
+                    candidates.push((path, data));
+                }
+            }
+        }
+
+        log::debug!("font scan: {} candidates found", candidates.len());
+
+        // 3. Парсим и scoring. Score tuple сравнивается лексикографически:
+        //    (cyrillic, box_drawing, blocks, greek, powerline, has_unicode_table, glyph_count)
+        //    Шрифт с Cyrillic всегда побеждает шрифт без Cyrillic, и т.д.
+        let mut best: Option<(PathBuf, Self, (u32, u32, u32, u32, u32, u32, u32))> = None;
+        for (path, data) in &candidates {
+            let Ok(f) = Self::from_bytes(data) else { continue };
+            let score = (
+                f.has_cyrillic() as u32,
+                f.has_box_drawing() as u32,
+                f.has_block_elements() as u32,
+                f.has_greek() as u32,
+                f.has_powerline() as u32,
+                f.has_unicode_table as u32,
+                f.glyph_count,
+            );
+            log::debug!(
+                "font candidate {}: {}x{} glyphs={} uni_table={} cyrillic={} box={} blk={} greek={} pwr={} score={:?}",
+                path.display(), f.width, f.height, f.glyph_count, f.has_unicode_table,
+                f.has_cyrillic(), f.has_box_drawing(), f.has_block_elements(),
+                f.has_greek(), f.has_powerline(), score
+            );
+            let better = match &best {
+                None => true,
+                Some((_, _, bs)) => score > *bs,
+            };
+            if better {
+                best = Some((path.clone(), f, score));
+            }
+        }
+
+        if let Some((path, f, score)) = best {
+            let has_cyr = f.has_cyrillic();
+            log::info!(
+                "loaded font from {} ({}x{} glyphs={} unicode_table={} cyrillic={} box_drawing={} greek={} powerline={} score={:?})",
+                path.display(), f.width, f.height, f.glyph_count, f.has_unicode_table,
+                f.has_cyrillic(), f.has_box_drawing(), f.has_greek(), f.has_powerline(), score
+            );
+            if !has_cyr {
+                log::warn!("loaded font does NOT contain Cyrillic glyphs — Russian text will render as '?'");
+                log::warn!("install a Unicode-capable font package to fix:");
+                log::warn!("  Arch:    sudo pacman -S terminus-font   (provides ter-u16n.psfu.gz)");
+                log::warn!("  Debian:  sudo apt install fonts-terminus console-setup");
+                log::warn!("  Fedora:  sudo dnf install terminus-fonts-pcf");
+                log::warn!("or copy a .psfu font to /etc/superhot-tty/font.psfu");
+            }
             return f;
         }
 
-        log::warn!("no system PSF font found, using builtin fallback 8x16");
+        log::warn!("no system PSF font found in any standard directory");
+        log::warn!("install one of:");
+        log::warn!("  Arch:    sudo pacman -S kbd terminus-font");
+        log::warn!("  Debian:  sudo apt install kbd console-setup fonts-terminus");
+        log::warn!("  Fedora:  sudo dnf install kbd terminus-fonts-pcf");
+        log::warn!("using builtin fallback 8x16 (NO Cyrillic, NO box-drawing)");
         Self::builtin_8x16()
+    }
+
+    /// Проверяет, покрывает ли шрифт базовый Cyrillic диапазон (U+0410–U+044F).
+    /// Это заглавные и строчные русские буквы. Без этого русский текст рендерится как '?'.
+    pub fn has_cyrillic(&self) -> bool {
+        [0x0410, 0x0411, 0x0412, 0x0415, 0x041F, 0x0420, 0x0430, 0x0435, 0x043F, 0x0440]
+            .iter()
+            .filter(|cp| self.unicode_map.contains_key(cp))
+            .count() >= 5
+    }
+
+    /// Проверяет, покрывает ли шрифт box-drawing диапазон (U+2500–U+257F).
+    /// Нужен для htop, btop, ncurses UI, рамок вокруг окон.
+    pub fn has_box_drawing(&self) -> bool {
+        [0x2500, 0x2502, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, 0x252C, 0x2534]
+            .iter()
+            .filter(|cp| self.unicode_map.contains_key(cp))
+            .count() >= 5
+    }
+
+    /// Проверяет, покрывает ли шрифт block elements (U+2580–U+259F).
+    /// ▀ ▄ █ ▒ ▓ — для прогресс-баров и заливки.
+    pub fn has_block_elements(&self) -> bool {
+        [0x2580, 0x2584, 0x2588, 0x258C, 0x2590, 0x2591, 0x2592, 0x2593]
+            .iter()
+            .filter(|cp| self.unicode_map.contains_key(cp))
+            .count() >= 4
+    }
+
+    /// Проверяет, покрывает ли шрифт греческий алфавит (U+0391–U+03C9).
+    pub fn has_greek(&self) -> bool {
+        [0x0391, 0x0392, 0x0395, 0x03A0, 0x03A3, 0x03B1, 0x03B5, 0x03C0]
+            .iter()
+            .filter(|cp| self.unicode_map.contains_key(cp))
+            .count() >= 4
+    }
+
+    /// Проверяет, покрывает ли шрифт Powerline symbols (U+E0A0–U+E0D4).
+    pub fn has_powerline(&self) -> bool {
+        [0xE0A0, 0xE0A1, 0xE0A2, 0xE0B0, 0xE0B2, 0xE0B3, 0xE0D4]
+            .iter()
+            .any(|cp| self.unicode_map.contains_key(cp))
     }
 
     /// Возвращает bitmap глифа для codepoint `cp`.
