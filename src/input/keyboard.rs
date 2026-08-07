@@ -69,6 +69,17 @@ pub enum KeyEvent {
     Repeat(Key),
 }
 
+/// Full key event with raw evdev keycode, for callers that need the
+/// underlying Linux keycode (e.g. to forward to X11 via XTest, where
+/// the X keycode = evdev keycode + 8).
+#[derive(Debug, Copy, Clone)]
+pub struct RawKeyEvent {
+    pub event: KeyEvent,
+    /// Raw evdev keycode (linux/input-event-codes.h). Available for
+    /// forwarding to other input systems (XTest, uinput, etc.).
+    pub keycode: u16,
+}
+
 pub struct Keyboard {
     fd: RawFd,
     pressed: HashSet<u16>,
@@ -150,6 +161,14 @@ impl Keyboard {
     }
 
     pub fn poll(&mut self) -> Vec<KeyEvent> {
+        self.poll_with_keycodes().into_iter().map(|r| r.event).collect()
+    }
+
+    /// То же что poll(), но также возвращает raw evdev keycode для каждого
+    /// события. Нужен для X11 keyboard forwarding через XTest (X keycode =
+    /// evdev keycode + 8). WM использует этот метод если активный tile —
+    /// X11; для terminal tiles достаточно обычного poll().
+    pub fn poll_with_keycodes(&mut self) -> Vec<RawKeyEvent> {
         let mut events = Vec::new();
         let mut buf = [0u8; std::mem::size_of::<InputEvent>() * 64];
         loop {
@@ -179,7 +198,7 @@ impl Keyboard {
                 };
                 if ev.value != 0 { self.pressed.insert(ev.code); }
                 else { self.pressed.remove(&ev.code); }
-                events.push(ke);
+                events.push(RawKeyEvent { event: ke, keycode: ev.code });
             }
             if (n as usize) < buf.len() { break; }
         }

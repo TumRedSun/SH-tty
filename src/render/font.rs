@@ -166,12 +166,21 @@ impl Font {
     ///
     /// 2. PSF fallback — если freetype недоступен или TTF не найден, используем
     ///    динамическое сканирование каталогов консольных шрифтов (как в v2).
-    pub fn load_default() -> Self {
+    ///
+    /// Параметры:
+    ///   `family_hint` — имя семейства из конфига (general.font). Используется
+    ///                   как приоритет при выборе TTF через fontconfig. Пустая
+    ///                   строка — берём любой monospace.
+    ///   `pixel_height` — желаемая высота глифа в пикселях (general.font_size).
+    ///                    0 = default 16px.
+    pub fn load_default_with_config(family_hint: &str, pixel_height: u32) -> Self {
+        let pixel_height = if pixel_height == 0 { 16 } else { pixel_height.clamp(8, 64) };
+
         // 0. User override через /etc/superhot-tty/font.ttf — TTF файл.
         // Если есть — используем freetype для рендеринга.
         for user_path in ["/etc/superhot-tty/font.ttf", "/etc/superhot-tty/font.otf"] {
             if std::path::Path::new(user_path).exists() {
-                match Self::from_ttf(user_path, 16) {
+                match Self::from_ttf(user_path, pixel_height) {
                     Ok(f) => {
                         log::info!(
                             "loaded user TTF font from {} ({}x{} glyphs={} cyrillic={} box_drawing={})",
@@ -202,10 +211,12 @@ impl Font {
         }
 
         // 2. TTF через fontconfig — основной путь. Ищем системный monospace TTF.
-        match find_ttf_via_fontconfig() {
+        //    Если family_hint задан (например "JetBrains Mono"), пытаемся сначала
+        //    найти именно его через fc-match. Иначе — любой monospace.
+        match find_ttf_via_fontconfig(family_hint) {
             Some((path, family)) => {
-                log::info!("fontconfig selected TTF: {} ({})", path, family);
-                match Self::from_ttf(&path, 16) {
+                log::info!("fontconfig selected TTF: {} ({}) size={}px", path, family, pixel_height);
+                match Self::from_ttf(&path, pixel_height) {
                     Ok(f) => {
                         log::info!(
                             "loaded TTF font from {} ({}x{} glyphs={} cyrillic={} box_drawing={} greek={} powerline={})",
@@ -230,6 +241,13 @@ impl Font {
 
         // 3. PSF fallback — dynamic scan of console font directories.
         Self::load_psf_fallback()
+    }
+
+    /// Legacy-точка входа — вызывает `load_default_with_config` с дефолтами
+    /// (любой monospace, 16px). Сохранена для совместимости с существующими
+    /// вызовами и тестами.
+    pub fn load_default() -> Self {
+        Self::load_default_with_config("", 16)
     }
 
     /// PSF fallback: динамическое сканирование каталогов консольных шрифтов.
@@ -329,13 +347,23 @@ impl Font {
         Self::builtin_8x16()
     }
 
-    /// Загружает TTF/OTF шрифт через freetype и пререндерит все codepoints из
-    /// диапазона 0..=0xFFFF (BMP) в PSF-совместимую bitmap структуру.
+    /// Загружает TTF/OTF шрифт через freetype и пререндерит все codepoints,
+    /// которые есть в шрифте, в PSF-совместимую bitmap структуру.
     ///
     /// Это позволяет WM рендерить ЛЮБОЙ Unicode символ, который есть в шрифте —
-    /// кириллица, греческий, box-drawing, математические операторы, и т.д.
+    /// кириллица, греческий, box-drawing, математические операторы, emoji (если
+    /// в шрифте, например Noto Color Mono), CJK, и т.д.
     /// TTF предпочтительнее PSF — у TTF обычно 2000-3000+ glyphs против 256-1000
     /// у PSF, плюс TTF поддерживает любые размеры и hinting.
+    ///
+    /// В отличие от старой версии (которая итерировала только 0..=0xFFFF и
+    /// использовала codepoint как прямой индекс), эта версия:
+    ///   1. Итерирует charmap шрифта через `face.chars()` — получает ВСЕ
+    ///      codepoints включая Plane 1+ (emoji U+1F600, CJK Ext B U+20000+, и т.д.).
+    ///   2. Использует последовательный glyph index (0, 1, 2, ...) — это
+    ///      compact: для шрифта с 3000 glyphs выделяем 3000 слотов, а не 65536.
+    ///   3. Codepoint → glyph index mapping хранится в `unicode_map` (HashMap).
+    ///      glyph_for() уже умеет с ним работать.
     ///
     /// `pixel_height` — желаемая высота глифа в пикселях (16, 20, 24).
     /// Ширина подбирается автоматически по advance width (для monospace это
@@ -361,39 +389,60 @@ impl Font {
         let bytes_per_row = ((target_width + 7) / 8) as usize;
         let bytes_per_glyph = bytes_per_row * pixel_height as usize;
 
+        // Get font metrics for proper vertical alignment.
+        // ascender/descender are in 26.6 fixed point after set_char_size —
+        // but freetype-rs exposes them as FT_Short (raw font units scaled by
+        // current size). size_metrics gives the scaled values directly.
+        let (ascender, descender) = if let Some(m) = face.size_metrics() {
+            // ascender/descender in pixels (already scaled, in 26.6 fixed → shift).
+            let a = (m.ascender >> 6) as i32;
+            let d = (m.descender >> 6) as i32; // negative
+            (a, d)
+        } else {
+            // Fallback: face.ascender()/descender() in font units, scaled by
+            // pixel_height / em_size. Most fonts have em_size = 1000 or 2048.
+            let em = face.em_size().max(1) as i32;
+            let a = (face.ascender() as i32) * pixel_height as i32 / em;
+            let d = (face.descender() as i32) * pixel_height as i32 / em;
+            (a, d)
+        };
+        // baseline = ascender pixels from the top of the cell.
+        let baseline = ascender.max(0).min(pixel_height as i32 - 1);
+
         log::debug!(
-            "TTF {}: target_width={}px height={}px bytes_per_glyph={}",
-            path, target_width, pixel_height, bytes_per_glyph
+            "TTF {}: target_width={}px height={}px bytes_per_glyph={} ascender={} descender={} baseline={}",
+            path, target_width, pixel_height, bytes_per_glyph, ascender, descender, baseline
         );
 
-        // Pre-allocate for full BMP (65536 codepoints).
-        // Total memory: 65536 * bytes_per_glyph (e.g., 65536 * 32 = 2MB for 16x16).
-        // Acceptable — startup cost is ~50-200ms for typical fonts with ~3000 glyphs.
-        let glyph_capacity = 0x10000usize;
-        let mut glyphs = vec![0u8; glyph_capacity * bytes_per_glyph];
-        let mut unicode_map: HashMap<u32, u32> = HashMap::new();
-        let mut max_idx: u32 = 0;
+        // First pass: collect all (codepoint, glyph_index) pairs from the
+        // font's charmap. This includes codepoints above U+FFFF (emoji, CJK
+        // extensions, etc.) which the old BMP-only loop missed.
+        let charmap: Vec<(u32, u32)> = face.chars()
+            .map(|(cp, gi)| (cp as u32, gi.get()))
+            .collect();
+
+        // Pre-allocate glyphs vec with one slot per charmap entry.
+        // For a typical font with ~3000 glyphs at 16px (bytes_per_glyph=32),
+        // this is ~96KB — far less than the old 65536 * 32 = 2MB.
+        let total_glyphs = charmap.len();
+        let mut glyphs = vec![0u8; total_glyphs * bytes_per_glyph];
+        let mut unicode_map: HashMap<u32, u32> = HashMap::with_capacity(total_glyphs);
         let mut rendered_count = 0u32;
         let mut failed_count = 0u32;
 
-        // Iterate all BMP codepoints. For each:
-        //   - Try to load the glyph via freetype.
-        //   - If glyph exists (char_index != 0), render it as monochrome bitmap.
-        //   - Copy bitmap into PSF-packed format with proper vertical centering.
-        //   - Map codepoint → glyph index (direct: cp = idx for BMP).
-        for cp in 0u32..=0xFFFF {
-            // Fast path: check if char exists in font via get_char_index.
-            // This avoids the expensive load_char for undefined codepoints.
-            // get_char_index returns Option<u32> — None means char not in font.
-            if face.get_char_index(cp as usize).is_none() {
-                continue; // Codepoint not in font — leave as empty glyph (zeros).
-            }
+        // Second pass: render each glyph into its sequential slot.
+        for (seq_idx, (cp, glyph_index)) in charmap.iter().enumerate() {
+            let seq_idx = seq_idx as u32;
 
-            // Load + render. MONOCHROME produces 1-bit-per-pixel packed bitmap
-            // (compatible with PSF format). RENDER forces rasterization.
-            let load_result = face.load_char(cp as usize, LoadFlag::RENDER | LoadFlag::MONOCHROME);
-            if load_result.is_err() {
+            // Load + render. We use load_glyph (not load_char) since we
+            // already have the glyph index from the charmap iterator.
+            // MONOCHROME produces 1-bit-per-pixel packed bitmap (PSF-compatible).
+            // RENDER forces rasterization.
+            if face.load_glyph(*glyph_index, LoadFlag::RENDER | LoadFlag::MONOCHROME).is_err() {
                 failed_count += 1;
+                // Still map the codepoint to the empty slot so lookup doesn't
+                // fall back to '?' — the user sees a blank instead.
+                unicode_map.insert(*cp, seq_idx);
                 continue;
             }
 
@@ -406,29 +455,24 @@ impl Font {
             let buffer = bitmap.buffer();
             let pitch = bitmap.pitch().unsigned_abs() as usize;
 
-            // Use codepoint as glyph index (direct mapping, since we have 65536 slots).
-            let idx = cp;
-            let glyph_off = idx as usize * bytes_per_glyph;
-            if glyph_off + bytes_per_glyph > glyphs.len() {
-                continue; // Shouldn't happen, but be safe.
-            }
+            let glyph_off = seq_idx as usize * bytes_per_glyph;
 
             // Empty glyph (e.g., space) — leave as zeros, but still map it.
             if buffer.is_empty() || bm_width == 0 || bm_rows == 0 {
-                unicode_map.insert(cp, idx);
-                if idx > max_idx { max_idx = idx; }
+                unicode_map.insert(*cp, seq_idx);
                 rendered_count += 1;
                 continue;
             }
 
-            // Vertical centering: align glyph baseline with cell baseline.
-            // For a cell of height H, baseline is typically at row H-3 (with
-            // 3px descent for chars like 'g', 'p', 'y').
-            let baseline = pixel_height as i32 - 3;
+            // Vertical positioning: bm_top is pixels above baseline (from freetype).
+            // To place the glyph's top row in the cell, we compute:
+            //   y_offset = baseline - bm_top
+            // (positive = below cell top, negative = above cell top → clipped)
             let y_offset = baseline - bm_top;
 
-            // Horizontal centering: place glyph at bm_left offset (already
-            // provided by freetype), but clamp to cell width.
+            // Horizontal positioning: bm_left is pixels to the right of the
+            // glyph origin (from freetype). For monospace fonts, bm_left is
+            // usually 0 or small positive. Clamp to cell width to avoid OOB.
             let x_offset = bm_left.max(0).min(target_width as i32 - 1);
 
             // Copy freetype's monochrome bitmap into our PSF-packed buffer.
@@ -459,46 +503,44 @@ impl Font {
                 }
             }
 
-            unicode_map.insert(cp, idx);
-            if idx > max_idx { max_idx = idx; }
+            unicode_map.insert(*cp, seq_idx);
             rendered_count += 1;
         }
 
         // Ensure '?' (U+003F) is mapped — it's the fallback in glyph_for().
+        // If the font somehow doesn't have '?', draw a minimal one manually
+        // at the next available slot.
         if !unicode_map.contains_key(&(b'?' as u32)) {
-            // Draw a simple '?' glyph manually if font doesn't have it.
-            // (Extremely unlikely for any real font, but be safe.)
-            let q_off = (b'?' as u32) as usize * bytes_per_glyph;
-            if q_off + bytes_per_glyph <= glyphs.len() {
-                // Top arc + descender — minimal '?' shape.
-                let mid = bytes_per_row / 2;
+            let q_idx = unicode_map.len() as u32;
+            // Extend glyphs vec to fit the new '?' slot.
+            glyphs.resize(((q_idx + 1) as usize) * bytes_per_glyph, 0);
+            let q_off = q_idx as usize * bytes_per_glyph;
+            // Top arc + descender — minimal '?' shape.
+            let mid = bytes_per_row / 2;
+            if mid < bytes_per_row {
                 glyphs[q_off + 0 * bytes_per_row + mid] = 0x3C;
                 glyphs[q_off + 1 * bytes_per_row + mid] = 0x42;
                 glyphs[q_off + 2 * bytes_per_row + mid] = 0x02;
                 glyphs[q_off + 3 * bytes_per_row + mid] = 0x04;
                 glyphs[q_off + 4 * bytes_per_row + mid] = 0x08;
                 glyphs[q_off + 5 * bytes_per_row + mid] = 0x08;
-                glyphs[q_off + 7 * bytes_per_row + mid] = 0x08;
+                if pixel_height as usize > 7 {
+                    glyphs[q_off + 7 * bytes_per_row + mid] = 0x08;
+                }
             }
-            unicode_map.insert(b'?' as u32, b'?' as u32);
-            if (b'?' as u32) > max_idx { max_idx = b'?' as u32; }
+            unicode_map.insert(b'?' as u32, q_idx);
         }
 
         log::info!(
-            "TTF rendered: {} glyphs ({} failed) from {}, max_idx={}, cell={}x{}, mem={}KB",
-            rendered_count, failed_count, path, max_idx, target_width, pixel_height,
+            "TTF rendered: {} glyphs ({} failed) from {}, total_chars={}, cell={}x{}, mem={}KB",
+            rendered_count, failed_count, path, total_glyphs, target_width, pixel_height,
             (glyphs.len() + 1023) / 1024
         );
-
-        // Trim glyphs vec to actual used size to save memory.
-        // We keep slots 0..=max_idx, drop the rest.
-        let trimmed_len = (max_idx as usize + 1) * bytes_per_glyph;
-        glyphs.truncate(trimmed_len);
 
         Ok(Font {
             width: target_width,
             height: pixel_height,
-            glyph_count: max_idx + 1,
+            glyph_count: total_glyphs as u32,
             bytes_per_glyph: bytes_per_glyph as u32,
             glyphs,
             has_unicode_table: true,
@@ -555,10 +597,13 @@ impl Font {
     pub fn glyph_for(&self, cp: u32) -> &[u8] {
         let idx = if !self.unicode_map.is_empty() {
             // Шрифт с unicode table — используем её для корректного lookup'а.
-            // Если codepoint не найден — fallback на '?'.
+            // Если codepoint не найден — fallback на glyph для '?' (lookup в map).
+            // Это работает для TTF (где '?' — seq index) и для PSF с unicode table
+            // (где '?' — glyph index из шрифта). Только если и '?' нет в шрифте,
+            // берём 0-й glyph (обычно empty/space).
             self.unicode_map.get(&cp).copied()
-                .or_else(|| if cp < 0x80 { Some(cp) } else { None })
-                .unwrap_or(b'?' as u32)
+                .or_else(|| self.unicode_map.get(&(b'?' as u32)).copied())
+                .unwrap_or(0)
                 .min(self.glyph_count.saturating_sub(1))
         } else if !self.has_unicode_table {
             // Legacy: no unicode table — direct ASCII + hardcoded Cyrillic.
@@ -821,51 +866,78 @@ fn load_maybe_gz(path: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Запрашивает fontconfig (`fc-match`) для поиска системного monospace TTF.
 ///
-/// Команда: `fc-match -f "%{file}:%{family}\n" monospace:spacing=100`
-///   - `monospace` — запрашиваем семейство monospace
+/// Если `family_hint` не пустой — сначала пытаемся найти именно этот шрифт:
+///   `fc-match -f "%{file}\t%{family}" "Family Name:spacing=100"`
+/// Если family_hint пустой или не нашёлся — fallback на любой monospace:
+///   `fc-match -f "%{file}\t%{family}" "monospace:spacing=100"`
+///
 ///   - `spacing=100` — требуем strictly monospace (фиксированная ширина)
 ///   - `%{file}` — путь к TTF файлу
 ///   - `%{family}` — имя семейства (для логов)
 ///
 /// Возвращает (path, family) или None если fc-match недоступен.
-fn find_ttf_via_fontconfig() -> Option<(String, String)> {
+fn find_ttf_via_fontconfig(family_hint: &str) -> Option<(String, String)> {
     use std::process::Command;
 
-    let output = Command::new("fc-match")
-        .args(["-f", "%{file}\t%{family}", "monospace:spacing=100"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        log::debug!("fc-match failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().next()?.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    // Parse "path\tFamily Name" — split on first tab.
-    let (path, family) = match line.split_once('\t') {
-        Some((p, f)) => (p.to_string(), f.to_string()),
-        None => (line.to_string(), String::from("unknown")),
+    // Список паттернов для fc-match — идём от конкретного к общему.
+    // Если family_hint задан (например "JetBrains Mono"), пробуем сначала его.
+    let patterns: Vec<String> = if family_hint.is_empty() {
+        vec!["monospace:spacing=100".to_string()]
+    } else {
+        vec![
+            format!("{}:spacing=100", family_hint),
+            format!("{}:family", family_hint),
+            "monospace:spacing=100".to_string(),
+        ]
     };
 
-    // Sanity check: file must exist and end with .ttf/.otf/.ttc
-    if !std::path::Path::new(&path).exists() {
-        log::warn!("fc-match returned non-existent path: {}", path);
-        return None;
+    for pattern in &patterns {
+        let output = Command::new("fc-match")
+            .args(["-f", "%{file}\t%{family}", pattern])
+            .output()
+            .ok();
+
+        let output = match output {
+            Some(o) => o,
+            None => continue,
+        };
+
+        if !output.status.success() {
+            log::debug!("fc-match pattern '{}' failed: {}", pattern,
+                String::from_utf8_lossy(&output.stderr).trim());
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = match stdout.lines().next() {
+            Some(l) => l.trim(),
+            None => continue,
+        };
+        if line.is_empty() { continue; }
+
+        // Parse "path\tFamily Name" — split on first tab.
+        let (path, family) = match line.split_once('\t') {
+            Some((p, f)) => (p.to_string(), f.to_string()),
+            None => (line.to_string(), String::from("unknown")),
+        };
+
+        // Sanity check: file must exist and end with .ttf/.otf/.ttc
+        if !std::path::Path::new(&path).exists() {
+            log::debug!("fc-match pattern '{}' returned non-existent path: {}", pattern, path);
+            continue;
+        }
+
+        let lower = path.to_lowercase();
+        if !lower.ends_with(".ttf") && !lower.ends_with(".otf") && !lower.ends_with(".ttc") {
+            log::debug!("fc-match pattern '{}' returned non-TTF path: {} — skipping", pattern, path);
+            continue;
+        }
+
+        log::debug!("fc-match pattern '{}' → {} ({})", pattern, path, family);
+        return Some((path, family));
     }
 
-    let lower = path.to_lowercase();
-    if !lower.ends_with(".ttf") && !lower.ends_with(".otf") && !lower.ends_with(".ttc") {
-        log::warn!("fc-match returned non-TTF path: {} — skipping", path);
-        return None;
-    }
-
-    Some((path, family))
+    None
 }
 
 /// Определяет целевую ширину глифа для TTF шрифта по advance width

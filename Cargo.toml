@@ -39,8 +39,8 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.11"
 
-# X11 compositor client + XTest (no xinput — он не нужен нам)
-x11rb = { version = "0.13", features = ["composite", "damage", "shm", "xkb", "randr", "render", "xfixes"] }
+# X11 compositor client + XTest (для инжекта клавиатурного ввода в X11 окна)
+x11rb = { version = "0.13", features = ["composite", "damage", "shm", "xkb", "randr", "render", "xfixes", "xtest"] }
 
 # Serialization for config + IPC
 serde = { version = "1.0", features = ["derive"] }

@@ -374,8 +374,12 @@ fn main() -> Result<()> {
     let fmt = PixelFmt::Xrgb8888;
     log::info!("canvas: {}x{} fmt={:?}", canvas_w, canvas_h, fmt);
     let canvas = Canvas::new(canvas_w, canvas_h, fmt);
-    log::info!("loading font...");
-    let font = Font::load_default();
+    log::info!("loading font (family='{}' size={}px)...",
+        cfg_system.general.font, cfg_system.general.font_size);
+    let font = Font::load_default_with_config(
+        &cfg_system.general.font,
+        cfg_system.general.font_size,
+    );
     log::info!("font: {}x{}", font.width, font.height);
     let theme = build_theme(&cfg_system);
     log::info!("opening keyboard...");
@@ -812,6 +816,11 @@ fn run_wm(
 
     // Для отслеживания изменения ws через execute_action.
     let mut prev_ws: u8 = workspaces.current;
+    // Для отслеживания изменения фокуса на X11 окно. Когда пользователь
+    // переключается на X11 tile, вызываем set_input_focus на соответствующее
+    // X-окно — иначе клавиатурный ввод через XTest уходит "в никуда" (X-сервер
+    // маршрутизирует события в окно с input focus, а дефолтный focus = root).
+    let mut last_x11_focus: Option<u32> = None;
 
     while !*quit_wm {
         let frame_start = Instant::now();
@@ -891,8 +900,13 @@ fn run_wm(
         }
 
         // 1. Keyboard.
-        let events = keyboard.poll();
-        for ev in events {
+        // poll_with_keycodes() returns RawKeyEvent { event, keycode } — keycode
+        // нужен чтобы форвардить клавиатурный ввод в X11 окна через XTest
+        // (X keycode = evdev keycode + 8).
+        let events = keyboard.poll_with_keycodes();
+        for raw_ev in events {
+            let ev = raw_ev.event;
+            let evdev_keycode = raw_ev.keycode;
             match ev {
                 KeyEvent::Press(key) | KeyEvent::Repeat(key) => {
                     if launcher.visible {
@@ -961,7 +975,21 @@ fn run_wm(
                         }
                     } else {
                         if let Some(focused_id) = workspaces.current_layout().focused {
-                            if let Some(tile) = terminals.get_mut(&focused_id) {
+                            // Сначала проверяем — это X11 tile? Если да, форвардим
+                            // клавишу в X-сервер через XTest (X keycode = evdev + 8).
+                            // XTest fake_input отправляет событие в окно с input
+                            // focus, который мы установили через set_input_focus.
+                            let is_x11_tile = x11.as_ref()
+                                .and_then(|x| x.tile_window(focused_id.0))
+                                .is_some();
+                            if is_x11_tile {
+                                if let Some(x) = x11.as_ref() {
+                                    if let Err(e) = x.send_key(evdev_keycode as u32, true) {
+                                        log::debug!("X11 send_key(press, kc={}) failed: {}",
+                                            evdev_keycode, e);
+                                    }
+                                }
+                            } else if let Some(tile) = terminals.get_mut(&focused_id) {
                                 // Сначала пробуем специальные клавиши (стрелки, F-keys,
                                 // Home/End, PageUp/Down, Insert/Delete, Escape, Backspace).
                                 // to_pty_bytes учитывает DECCKM (app cursor keys mode),
@@ -985,8 +1013,52 @@ fn run_wm(
                         }
                     }
                 }
+                KeyEvent::Release(_) => {
+                    // Terminal tiles игнорируют Release (PTY сам отслеживает
+                    // состояние клавиш через modifier keys). Но для X11 окон
+                    // нужно форвардить Release тоже — иначе X-сервер думает
+                    // что клавиша осталась нажатой (например, зажатый Shift
+                    // ломает следующую букву).
+                    if !keyboard.super_ && !resize_mode && !launcher.visible {
+                        if let Some(focused_id) = workspaces.current_layout().focused {
+                            let is_x11_tile = x11.as_ref()
+                                .and_then(|x| x.tile_window(focused_id.0))
+                                .is_some();
+                            if is_x11_tile {
+                                if let Some(x) = x11.as_ref() {
+                                    let _ = x.send_key(evdev_keycode as u32, false);
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // Sync X11 input focus with the currently focused tile.
+        // Если focused tile — X11, ставим input focus на соответствующее X-окно.
+        // Если focused tile — terminal (или нет фокуса), снимаем X-focus (back
+        // to root). Без этого XTest fake_input отправляет клавиши в root window
+        // (никто их не получает) — поэтому X11 окна "не реагируют на клавиатуру".
+        let desired_x11_focus = if let Some(focused_id) = workspaces.current_layout().focused {
+            x11.as_ref()
+                .and_then(|x| x.tile_window(focused_id.0))
+                .map(|xwid| xwid.0)
+        } else {
+            None
+        };
+        if desired_x11_focus != last_x11_focus {
+            if let Some(x) = x11.as_mut() {
+                if let Some(xid) = desired_x11_focus {
+                    if let Err(e) = x.focus_window(xid) {
+                        log::debug!("focus_window(0x{:x}) failed: {}", xid, e);
+                    }
+                } else {
+                    let _ = x.unfocus();
+                }
+            }
+            last_x11_focus = desired_x11_focus;
         }
 
         // Проверяем, изменился ли workspace (через hotkey или IPC).
@@ -1557,10 +1629,21 @@ fn close_focused(
     x11: &mut Option<x11::X11Compositor>,
 ) {
     if let Some(focused_id) = workspaces.current_layout().focused {
+        // Если это X11 tile — сначала закрываем X-окно (WM_DELETE_WINDOW или
+        // destroy_window), потом удаляем binding. X-клиент либо закрывается
+        // сам (получив WM_DELETE_WINDOW), либо мы его жёстко уничтожаем.
         if let Some(x) = x11.as_mut() {
+            if let Some(xwid) = x.tile_window(focused_id.0) {
+                if let Err(e) = x.close_window(xwid.0) {
+                    log::warn!("close_window(0x{:x}) failed: {}", xwid.0, e);
+                }
+            }
             x.unbind_tile(focused_id.0);
         }
         if terminals.remove(&focused_id).is_some() {
+            workspaces.current_layout_mut().close_leaf(focused_id);
+        } else {
+            // Для X11 tile тоже нужно закрыть leaf (иначе он останется пустым).
             workspaces.current_layout_mut().close_leaf(focused_id);
         }
     }
@@ -1635,7 +1718,22 @@ fn render_frame(
 
         let title = match kind {
             TileKind::Terminal => terminals.get(leaf_id).map(|t| t.title.clone()).unwrap_or_else(|| "term".into()),
-            TileKind::X11 => "x11".into(),
+            TileKind::X11 => {
+                // Используем реальный WM_NAME окна вместо хардкоженного "x11".
+                // Если окно ещё не привязано или WM_NAME не получен — fallback
+                // на "x11" (совместимость со старым поведением).
+                if let Some(x) = x11 {
+                    if let Some(xwid) = x.tile_window(leaf_id.0) {
+                        x.window_title(xwid.0)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "x11".into())
+                    } else {
+                        "x11".into()
+                    }
+                } else {
+                    "x11".into()
+                }
+            }
         };
         text.draw_text(rect.x + 8, rect.y + 2, &title,
             if focused { theme.accent_magenta } else { theme.fg_dim },
