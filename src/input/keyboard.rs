@@ -96,6 +96,9 @@ pub struct RawKeyEvent {
     pub alt: bool,
     pub super_: bool,
     pub altgr: bool,
+    /// Caps Lock state (toggled on each CapsLock key press). Included so
+    /// the login screen can capitalize letters when Caps Lock is on.
+    pub caps_lock: bool,
 }
 
 pub struct Keyboard {
@@ -106,6 +109,9 @@ pub struct Keyboard {
     pub alt: bool,
     pub super_: bool,
     pub altgr: bool,
+    /// Caps Lock toggle state. Unlike Shift/Ctrl (held), Caps Lock is a
+    /// toggle — press once to enable, press again to disable.
+    pub caps_lock: bool,
 }
 
 impl Keyboard {
@@ -171,10 +177,27 @@ impl Keyboard {
         if ret < 0 {
             log::warn!("EVIOCGRAB failed: {}", std::io::Error::last_os_error());
         }
+        // Read initial Caps Lock LED state so that if Caps Lock is already
+        // on when SH-tty starts (e.g., toggled in a previous session), we
+        // detect it. Without this, the user's password would silently be
+        // the wrong case. EVIOCGLED = _IOR('E', 0x19, u8[len]).
+        const EVIOCGLED_1: libc::c_ulong =
+            ((2u32 << 30) | (1u32 << 16) | (0x45u32 << 8) | 0x19u32) as libc::c_ulong;
+        let mut led_bits = [0u8; 1];
+        let caps_lock = if unsafe { libc::ioctl(fd, EVIOCGLED_1, led_bits.as_mut_ptr()) } >= 0 {
+            // LED_CAPSL = 1 (bit 1)
+            (led_bits[0] & (1 << 1)) != 0
+        } else {
+            false
+        };
+        if caps_lock {
+            log::info!("Caps Lock is ON (detected via LED state at startup)");
+        }
         Ok(Keyboard {
             fd,
             pressed: HashSet::new(),
             shift: false, ctrl: false, alt: false, super_: false, altgr: false,
+            caps_lock,
         })
     }
 
@@ -216,6 +239,12 @@ impl Keyboard {
                     Key::LeftAlt => self.alt = ev.value != 0,
                     Key::RightAlt => self.altgr = ev.value != 0,
                     Key::LeftSuper | Key::RightSuper => self.super_ = ev.value != 0,
+                    // Caps Lock is a toggle: flip state on key press.
+                    // Only flip on press (value=1), not release/repeat,
+                    // to avoid double-toggling. CapsLock evdev keycode=58.
+                    Key::Other(58) if ev.value == 1 => {
+                        self.caps_lock = !self.caps_lock;
+                    }
                     _ => {}
                 }
                 let ke = match ev.value {
@@ -241,6 +270,7 @@ impl Keyboard {
                     alt: self.alt,
                     super_: self.super_,
                     altgr: self.altgr,
+                    caps_lock: self.caps_lock,
                 });
             }
             if (n as usize) < buf.len() { break; }

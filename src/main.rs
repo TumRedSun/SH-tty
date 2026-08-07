@@ -423,8 +423,34 @@ fn main() -> Result<()> {
             let events = keyboard.poll_with_modifiers();
             for ev in events {
                 if let KeyEvent::Press(key) = ev.event {
+                    // CRITICAL: Filter out modifier keys (Shift, Ctrl, Alt,
+                    // Super) and unknown keys BEFORE calling handle_key.
+                    //
+                    // key_to_string() returns "?" for these keys (they
+                    // don't match any named arm), and handle_key() treats
+                    // "?" as a valid password character (it's ASCII graphic).
+                    //
+                    // This was THE root cause of "correct password rejected":
+                    // every time the user pressed Shift to type a capital
+                    // letter or a shifted symbol (!@#$%^&*), a spurious '?'
+                    // was silently inserted into the password. The user's
+                    // actual password "Pass123" became "?Pass123", and PAM
+                    // returned code 7 (PAM_AUTH_ERR) because the hash didn't
+                    // match.
+                    //
+                    // We also skip Key::Other(_) which covers CapsLock,
+                    // NumLock, ScrollLock, and any unknown evdev keycode —
+                    // none of these should produce password characters.
+                    match key {
+                        Key::LeftShift | Key::RightShift |
+                        Key::LeftCtrl | Key::RightCtrl |
+                        Key::LeftAlt | Key::RightAlt |
+                        Key::LeftSuper | Key::RightSuper |
+                        Key::Other(_) => continue,
+                        _ => {}
+                    }
                     let key_str = key_to_string(&key);
-                    login_screen.handle_key(&key_str, ev.shift, ev.ctrl);
+                    login_screen.handle_key(&key_str, ev.shift, ev.ctrl, ev.caps_lock);
 
                     if login_screen.state == login::LoginState::Authenticating {
                         let req = login::privsep::PrivsepMessage::AuthRequest {
@@ -935,8 +961,17 @@ fn run_wm(
             match ev {
                 KeyEvent::Press(key) | KeyEvent::Repeat(key) => {
                     if launcher.visible {
-                        let key_str = key_to_string(&key);
-                        if let Some(idx) = launcher.handle_key(&key_str) {
+                        // Skip modifier keys — key_to_string() returns "?"
+                        // for them, which would pollute the search query.
+                        match key {
+                            Key::LeftShift | Key::RightShift |
+                            Key::LeftCtrl | Key::RightCtrl |
+                            Key::LeftAlt | Key::RightAlt |
+                            Key::LeftSuper | Key::RightSuper |
+                            Key::Other(_) => {},
+                            _ => {
+                                let key_str = key_to_string(&key);
+                                if let Some(idx) = launcher.handle_key(&key_str) {
                             let entry = launcher.entries[idx].clone();
                             let display = current_cfg.x11.display.clone();
                             let shell = current_cfg.launcher.terminal_shell.clone();
@@ -977,6 +1012,8 @@ fn run_wm(
                             }
                             // Для X11 приложений — не делаем ничего здесь.
                             // tile будет создан когда X-клиент откроет окно.
+                        }
+                            }
                         }
                         continue;
                     }

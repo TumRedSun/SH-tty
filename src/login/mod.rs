@@ -72,8 +72,12 @@ impl LoginScreen {
         }
     }
 
-    pub fn handle_key(&mut self, key: &str, shift: bool, ctrl: bool) {
+    pub fn handle_key(&mut self, key: &str, shift: bool, ctrl: bool, caps_lock: bool) {
         let _ = ctrl;
+        // Effective uppercase flag for letters: Shift XOR Caps Lock.
+        // Caps Lock only affects letters (a-z), NOT digits/symbols.
+        // This matches standard PC keyboard behavior.
+        let letter_upper = shift ^ caps_lock;
         match self.state {
             LoginState::Welcome => {
                 if key == "Return" || key == "space" {
@@ -97,7 +101,13 @@ impl LoginScreen {
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.username.len() < 32 {
                             let mut ch = c.chars().next().unwrap();
-                            if shift { ch = apply_shift(ch); }
+                            if ch.is_ascii_alphabetic() {
+                                // Letters: Shift XOR Caps Lock
+                                if letter_upper { ch = ch.to_ascii_uppercase(); }
+                            } else if shift {
+                                // Non-letters: only Shift applies
+                                ch = apply_shift(ch);
+                            }
                             self.username.push(ch);
                         }
                     }
@@ -130,7 +140,13 @@ impl LoginScreen {
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.password.len() < 64 {
                             let mut ch = c.chars().next().unwrap();
-                            if shift { ch = apply_shift(ch); }
+                            if ch.is_ascii_alphabetic() {
+                                // Letters: Shift XOR Caps Lock
+                                if letter_upper { ch = ch.to_ascii_uppercase(); }
+                            } else if shift {
+                                // Non-letters: only Shift applies
+                                ch = apply_shift(ch);
+                            }
                             self.password.push(ch);
                         }
                     }
