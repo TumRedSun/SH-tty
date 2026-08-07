@@ -115,6 +115,18 @@ impl LoginScreen {
                         self.username.clear();
                         self.state = LoginState::Welcome;
                     }
+                    // Space is a valid password character — must handle
+                    // explicitly because key_to_string(Key::Space) returns
+                    // "space" (len 5), which doesn't match the
+                    // `c.len() == 1 && is_ascii_graphic()` pattern below
+                    // (space is 0x20, NOT ascii_graphic which starts at 0x21).
+                    // Without this, passwords containing spaces silently
+                    // drop the space → auth fails with "correct" password.
+                    "space" => {
+                        if self.password.len() < 64 {
+                            self.password.push(' ');
+                        }
+                    }
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.password.len() < 64 {
                             let mut ch = c.chars().next().unwrap();
@@ -292,6 +304,13 @@ pub struct UserInfo {
 extern "C" {
     fn pam_start(service_name: *const libc::c_char, user: *const libc::c_char, pam_conv: *const PamConv, ph: *mut *mut PamHandle) -> i32;
     fn pam_end(ph: *mut PamHandle, status: i32) -> i32;
+    // The Rust function below is also named `pam_authenticate`, so the FFI
+    // binding is renamed to avoid a conflict. BUT the C symbol in libpam is
+    // `pam_authenticate` — without `#[link_name]` the linker looks for
+    // `pam_authenticate_raw`, which doesn't exist, and the build fails.
+    // This was silently broken: anyone enabling `--features pam` would get
+    // a link error, so the feature was effectively unusable.
+    #[link_name = "pam_authenticate"]
     fn pam_authenticate_raw(ph: *mut PamHandle, flags: i32) -> i32;
     fn pam_acct_mgmt(ph: *mut PamHandle, flags: i32) -> i32;
 }

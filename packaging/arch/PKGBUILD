@@ -34,11 +34,14 @@ install=superhot-tty.install
 
 build() {
     cd "$srcdir"/SH-tty-$pkgver 2>/dev/null || cd "$srcdir"/superhot-tty 2>/dev/null || cd "$srcdir"
+    FEATURES=""
     if pkg-config --exists sdl2 2>/dev/null; then
-        cargo build --release --features gamepad-sdl2
-    else
-        cargo build --release
+        FEATURES="${FEATURES}gamepad-sdl2,"
     fi
+    # pam is in depends=, so always available — enable for real PAM auth
+    FEATURES="${FEATURES}pam,"
+    FEATURES="${FEATURES%,}"
+    cargo build --release --features "$FEATURES"
 }
 
 package() {

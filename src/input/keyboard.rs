@@ -72,12 +72,30 @@ pub enum KeyEvent {
 /// Full key event with raw evdev keycode, for callers that need the
 /// underlying Linux keycode (e.g. to forward to X11 via XTest, where
 /// the X keycode = evdev keycode + 8).
+///
+/// Also includes the modifier state **at the time this event was generated**.
+/// This is critical: `Keyboard.shift`/`.ctrl`/etc. reflect the state after
+/// ALL events in the current batch have been processed. If you read
+/// `keyboard.shift` while iterating over events from `poll()`, you get the
+/// FINAL state, not the state at the time of each event. This caused a bug
+/// where Shift+letter produced lowercase: if Shift-press, letter-press,
+/// letter-release, and Shift-release all arrived in the same `read()` batch,
+/// `keyboard.shift` was already `false` by the time we handled the letter
+/// press — so the login screen stored lowercase instead of uppercase,
+/// silently corrupting passwords with capitals / shifted symbols.
 #[derive(Debug, Copy, Clone)]
 pub struct RawKeyEvent {
     pub event: KeyEvent,
     /// Raw evdev keycode (linux/input-event-codes.h). Available for
     /// forwarding to other input systems (XTest, uinput, etc.).
     pub keycode: u16,
+    /// Modifier state captured at the moment this event was processed
+    /// (i.e. the state that should be used when interpreting this event).
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_: bool,
+    pub altgr: bool,
 }
 
 pub struct Keyboard {
@@ -164,6 +182,16 @@ impl Keyboard {
         self.poll_with_keycodes().into_iter().map(|r| r.event).collect()
     }
 
+    /// Like `poll()`, but each event carries the modifier state that was
+    /// active at the time the event was generated. Use this instead of
+    /// `poll()` whenever you need to interpret character keys with
+    /// Shift/Ctrl/Alt — reading `keyboard.shift` after `poll()` returns
+    /// gives you the FINAL state, not the per-event state, which silently
+    /// corrupts Shift+letter input when events arrive in the same batch.
+    pub fn poll_with_modifiers(&mut self) -> Vec<RawKeyEvent> {
+        self.poll_with_keycodes()
+    }
+
     /// То же что poll(), но также возвращает raw evdev keycode для каждого
     /// события. Нужен для X11 keyboard forwarding через XTest (X keycode =
     /// evdev keycode + 8). WM использует этот метод если активный tile —
@@ -198,7 +226,22 @@ impl Keyboard {
                 };
                 if ev.value != 0 { self.pressed.insert(ev.code); }
                 else { self.pressed.remove(&ev.code); }
-                events.push(RawKeyEvent { event: ke, keycode: ev.code });
+                // Capture modifier state AFTER processing this event, so the
+                // state reflects the modifier as of this event's timestamp.
+                // For a Shift-press event, self.shift is now true (correct).
+                // For a letter-press event while Shift is held, self.shift
+                // is still true (correct). For a Shift-release event,
+                // self.shift is now false (correct — the release itself
+                // shouldn't carry shift).
+                events.push(RawKeyEvent {
+                    event: ke,
+                    keycode: ev.code,
+                    shift: self.shift,
+                    ctrl: self.ctrl,
+                    alt: self.alt,
+                    super_: self.super_,
+                    altgr: self.altgr,
+                });
             }
             if (n as usize) < buf.len() { break; }
         }

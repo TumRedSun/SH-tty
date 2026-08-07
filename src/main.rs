@@ -411,11 +411,20 @@ fn main() -> Result<()> {
         loop {
             let frame_start = Instant::now();
 
-            let events = keyboard.poll();
+            // Use poll_with_modifiers() instead of poll() so each event
+            // carries the Shift/Ctrl state at the time it was generated.
+            // Reading keyboard.shift after poll() returns gives the FINAL
+            // state — if Shift-press + letter-press + Shift-release all
+            // arrive in one batch, keyboard.shift is already false when we
+            // process the letter, so Shift+letter silently becomes lowercase.
+            // This was the root cause of "correct password rejected" —
+            // passwords with capitals or shifted symbols (!@#$% etc.)
+            // were stored with wrong case / wrong character.
+            let events = keyboard.poll_with_modifiers();
             for ev in events {
-                if let KeyEvent::Press(key) = ev {
+                if let KeyEvent::Press(key) = ev.event {
                     let key_str = key_to_string(&key);
-                    login_screen.handle_key(&key_str, keyboard.shift, keyboard.ctrl);
+                    login_screen.handle_key(&key_str, ev.shift, ev.ctrl);
 
                     if login_screen.state == login::LoginState::Authenticating {
                         let req = login::privsep::PrivsepMessage::AuthRequest {
@@ -519,9 +528,25 @@ fn main() -> Result<()> {
                     }
                     Err(e) => {
                         log::warn!("auth failed: {}", e);
+                        // Send the actual error message (not just "Login failed")
+                        // so the user can see WHY auth failed — e.g.
+                        // "cannot read /etc/shadow" vs "authentication failed"
+                        // vs "account locked". The error string is shown on
+                        // the login screen's Error state.
+                        //
+                        // We do NOT include the username or any sensitive
+                        // data here — just the error category. The error
+                        // message from pam_authenticate is safe to display:
+                        //   - "authentication failed" (wrong password)
+                        //   - "account locked or no password"
+                        //   - "cannot read /etc/shadow (need root ...)"
+                        //   - "crypt() failed"
+                        //   - "user 'X' not found in passwd"
+                        // None of these leak sensitive info beyond what
+                        // the user already typed.
                         login::privsep::PrivsepMessage::AuthResult {
                             success: false,
-                            error: Some("Login failed".into()),
+                            error: Some(format!("{}", e)),
                             uid: None, gid: None, home_dir: None, shell: None,
                         }
                     }

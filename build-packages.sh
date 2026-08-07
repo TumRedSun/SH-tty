@@ -32,9 +32,19 @@ echo_red()    { echo -e "\e[31m$*\e[0m"; }
 # 1. Сначала собираем release-бинарник.
 echo_blue "==> Building release binary..."
 cd "${SCRIPT_DIR}"
+FEATURES=""
 if pkg-config --exists sdl2 2>/dev/null; then
     echo_green "SDL2 found, building with gamepad-sdl2"
-    cargo build --release --features gamepad-sdl2
+    FEATURES="${FEATURES}gamepad-sdl2,"
+fi
+if pkg-config --exists pam 2>/dev/null || [[ -f /usr/lib/libpam.so || -f /usr/lib/x86_64-linux-gnu/libpam.so ]]; then
+    echo_green "PAM found, building with pam feature"
+    FEATURES="${FEATURES}pam,"
+fi
+# Strip trailing comma
+FEATURES="${FEATURES%,}"
+if [[ -n "$FEATURES" ]]; then
+    cargo build --release --features "$FEATURES"
 else
     cargo build --release
 fi

@@ -120,9 +120,28 @@ else
     echo_yellow "  To enable SDL2 mapping: install libsdl2-dev and rebuild with --features gamepad-sdl2"
 fi
 
+# PAM detection — enables real PAM authentication via libpam.
+# Without this, the WM falls back to a crypt()-based auth that reads
+# /etc/shadow directly. The crypt() fallback works for most cases, but:
+#   - It bypasses pam_unix's account/session modules
+#   - On systems where crypt() doesn't support the hash algorithm
+#     (e.g. yescrypt on older libxcrypt), auth silently fails
+#   - PAM is the standard Linux auth stack and handles all edge cases
+# So we enable it whenever libpam is available.
+PAM_FEATURE=""
+if pkg-config --exists pam 2>/dev/null || [[ -f /usr/lib/libpam.so || -f /usr/lib/x86_64-linux-gnu/libpam.so || -f /usr/lib64/libpam.so ]]; then
+    PAM_FEATURE="--features pam"
+    echo_green "PAM (libpam) found — enabling pam feature for real PAM authentication"
+else
+    echo_yellow "PAM (libpam) not found — using crypt() fallback (reads /etc/shadow directly)"
+    echo_yellow "  For full PAM support: install pam/libpam0g-dev and rebuild with --features pam"
+fi
+
+ALL_FEATURES="$SDL2_FEATURE $PAM_FEATURE"
+
 echo_blue "==> Building superhot-tty v0.2 (release)..."
 cd "$SCRIPT_DIR"
-cargo build --release $SDL2_FEATURE
+cargo build --release $ALL_FEATURES
 
 echo_blue "==> Installing binary to /usr/local/bin/superhot-tty..."
 install -Dm755 target/release/superhot-tty /usr/local/bin/superhot-tty
