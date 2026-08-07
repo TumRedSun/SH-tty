@@ -245,13 +245,19 @@
 ```bash
 # 1. Установить зависимости (Arch Linux)
 sudo pacman -S rust cargo gcc pkgconf systemd kbd zsh pam \
-              xorg-server-xephyr pipewire pipewire-pulse wireplumber \
+              xorg-server-xvfb xorg-server-xephyr \
+              freetype2 fontconfig ttf-dejavu \
+              pipewire pipewire-pulse wireplumber \
               xdg-desktop-portal libvterm
 
 # 2. Клонировать и собрать
 git clone https://github.com/TumRedSun/SH-tty.git
 cd SH-tty
 cargo build --release
+
+# Если freetype2 system library недоступна (ошибка "Package freetype2 not found"),
+# можно собрать без TTF поддержки (fallback на PSF bitmap шрифты):
+# cargo build --release --no-default-features
 
 # 3. Установить
 sudo install -Dm755 target/release/superhot-tty /usr/local/bin/
@@ -1973,13 +1979,17 @@ ldconfig -p | grep vterm
 |---------|---------|---------|
 | Чёрный экран после reboot | DRM не получил master | Проверить лог: `journalctl -u superhot-tty@tty1` |
 | Login не работает | PAM не настроен | Установить libpam0g-dev, собрать с `--features pam` |
-| Окна X11 не появляются | Xephyr не запущен | Проверить: `pgrep Xephyr` |
+| Окна X11 не появляются | Xvfb не запущен | Проверить: `pgrep Xvfb` |
 | Нет звука | PipeWire не стартовал | `systemctl --user status pipewire` |
 | Скриншот не работает | Portal не зарегистрирован | Проверить: `dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames` |
 | Glitch-анимации не работают | Выключены в конфиге | Проверить `[animations]` секцию |
 | IPC не отвечает | Сокет не создан | Проверить `[ipc] enabled = true` и логи |
 | Live reload не работает | Watcher выключен | Проверить `[live_reload] enabled = true` |
 | Терминал глючит с цветами | libvterm недоступна | Установить libvterm |
+| **`Package freetype2 not found`** при сборке | Отсутствует freetype2 system library | **Arch:** `sudo pacman -S freetype2` **Debian:** `sudo apt install libfreetype6-dev` **Fedora:** `sudo dnf install freetype-devel` |
+| **Русский/Unicode текст рендерится как '?'** | Шрифт не найден или нет Unicode coverage | Установить TTF шрифт: `sudo pacman -S ttf-dejavu` (Arch). Проверить лог: ищется TTF через `fc-match` |
+| **X11 окна не получают клавиатурный ввод** | XTest extension недоступен | Проверить лог на "XTest extension NOT available". Xvfb должен поддерживать XTest (стандартная сборка xorg-server-xvfb поддерживает) |
+| **X11 окна не закрываются (Super+Q)** | Приложение не обрабатывает WM_DELETE_WINDOW | WM отправляет WM_DELETE_WINDOW, ждёт 200мс, затем force destroy. Если окно всё ещё не закрывается — проверить лог на ошибки close_window |
 
 ---
 

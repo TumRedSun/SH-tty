@@ -15,7 +15,12 @@ name = "shtty-msg"
 path = "src/bin/shtty_msg.rs"
 
 [features]
-default = []
+# TTF font rendering via freetype (requires libfreetype2-dev / freetype2.pc).
+# Enabled by default for full Unicode coverage (Cyrillic, box-drawing, etc.).
+# Disable with `--no-default-features` if freetype2 system library is unavailable —
+# WM will fall back to PSF bitmap fonts (limited Unicode coverage).
+default = ["ttf"]
+ttf = ["dep:freetype-rs"]
 # Включает SDL2 gamepad support. Требует libsdl2-dev.
 gamepad-sdl2 = ["dep:sdl2"]
 # Включает PAM аутентификацию (libpam). Без этой фичи login screen
@@ -83,7 +88,8 @@ memmap2 = "0.9"
 # TTF font rendering via freetype (for full Unicode coverage: Cyrillic, Greek,
 # box-drawing, math symbols, etc.). Falls back to PSF bitmap fonts if freetype
 # is unavailable or no TTF font is found.
-freetype-rs = "0.38"
+# Optional — disabled via `--no-default-features` if libfreetype2 is missing.
+freetype-rs = { version = "0.38", optional = true }
 
 [profile.release]
 opt-level = 3

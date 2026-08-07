@@ -368,6 +368,7 @@ impl Font {
     /// `pixel_height` — желаемая высота глифа в пикселях (16, 20, 24).
     /// Ширина подбирается автоматически по advance width (для monospace это
     /// одинаково для всех глифов).
+    #[cfg(feature = "ttf")]
     pub fn from_ttf(path: &str, pixel_height: u32) -> anyhow::Result<Self> {
         use freetype::Library;
         use freetype::face::LoadFlag;
@@ -546,6 +547,13 @@ impl Font {
             has_unicode_table: true,
             unicode_map,
         })
+    }
+
+    /// Stub for from_ttf when the `ttf` feature is disabled.
+    /// Returns an error so load_default_with_config falls back to PSF.
+    #[cfg(not(feature = "ttf"))]
+    pub fn from_ttf(_path: &str, _pixel_height: u32) -> anyhow::Result<Self> {
+        anyhow::bail!("TTF support disabled at compile time (build with --features ttf or default features to enable)")
     }
 
     /// Проверяет, покрывает ли шрифт базовый Cyrillic диапазон (U+0410–U+044F).
@@ -876,6 +884,7 @@ fn load_maybe_gz(path: &str) -> anyhow::Result<Vec<u8>> {
 ///   - `%{family}` — имя семейства (для логов)
 ///
 /// Возвращает (path, family) или None если fc-match недоступен.
+#[cfg(feature = "ttf")]
 fn find_ttf_via_fontconfig(family_hint: &str) -> Option<(String, String)> {
     use std::process::Command;
 
@@ -940,11 +949,18 @@ fn find_ttf_via_fontconfig(family_hint: &str) -> Option<(String, String)> {
     None
 }
 
+/// Stub for find_ttf_via_fontconfig when the `ttf` feature is disabled.
+#[cfg(not(feature = "ttf"))]
+fn find_ttf_via_fontconfig(_family_hint: &str) -> Option<(String, String)> {
+    None
+}
+
 /// Определяет целевую ширину глифа для TTF шрифта по advance width
 /// нескольких репрезентативных символов. Для monospace шрифтов advance
 /// одинаков для всех глифов — берём максимум из тестовых символов.
 ///
 /// Возвращает ширину в пикселях (8-16).
+#[cfg(feature = "ttf")]
 fn determine_ttf_width(face: &freetype::Face) -> u32 {
     use freetype::face::LoadFlag;
 

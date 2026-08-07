@@ -394,10 +394,13 @@ impl X11Compositor {
             title,
         });
 
-        // Auto-focus the newly registered window so it receives keyboard
-        // input immediately. This is what users expect: when an app launches,
-        // it should be ready to type.
-        let _ = self.focus_window(xid);
+        // НЕ вызываем focus_window здесь. Раньше это порождало race condition:
+        // register_window ставил X-focus на новое окно, но WM focused tile
+        // ещё не был обновлён (это происходит в auto_place после poll_events).
+        // В следующем кадре focus sync видел что WM focused tile не X11,
+        // вызывал unfocus() — и X-focus возвращался на root.
+        // Теперь фокус управляется исключительно через focus sync в main loop —
+        // он ставит X-focus на X-окно когда WM focused tile = X11 tile.
 
         let _ = self.conn.flush();
     }
@@ -532,7 +535,7 @@ impl X11Compositor {
     ///
     /// Конвертация keycode: X11 keycodes = evdev keycodes + 8 (X резервирует
     /// 0-7 для modifier keys). Это стандартный offset для X-серверов с
-    /// evdev keyboard driver (включая Xvfb).
+    /// evdev keyboard driver (включая Xvfb на современных системах).
     pub fn send_key(&self, evdev_keycode: u32, pressed: bool) -> Result<()> {
         // Skip modifier-only events — they're tracked separately via
         // Keyboard.shift/ctrl/alt/super_ flags, and X server generates its
@@ -546,6 +549,8 @@ impl X11Compositor {
         };
 
         // XTest fake_input: type=2 (FakeInput), detail=event_type (KeyPress=2/KeyRelease=3).
+        // Если XTest opcode не закэширован (extension недоступен), fake_input
+        // всё равно вернёт Err — мы логируем это и возвращаем ошибку.
         match x11rb::protocol::xtest::fake_input(
             &self.conn,
             event_type as u8,
@@ -566,13 +571,72 @@ impl X11Compositor {
         }
     }
 
+    /// Альтернативный способ отправить keyboard event в X-окно: XSendEvent.
+    /// Используется как fallback если XTest недоступен. Менее надёжен —
+    /// многие приложения (Firefox, Chromium) игнорируют synthetic events
+    /// из соображений безопасности. Но для простых приложений (xterm, xeyes)
+    /// это работает.
+    pub fn send_key_via_send_event(&self, xid: u32, evdev_keycode: u32, pressed: bool) -> Result<()> {
+        let x_keycode = (evdev_keycode + 8) as u8;
+        let response_type = if pressed {
+            x11rb::protocol::xproto::KEY_PRESS_EVENT
+        } else {
+            x11rb::protocol::xproto::KEY_RELEASE_EVENT
+        };
+
+        // Конструируем KeyPressEvent как raw [u8; 32] буфер.
+        // X11 KeyPress/KeyRelease event structure (32 bytes):
+        //   offset 0: response_type (u8) — 2 for KeyPress, 3 for KeyRelease
+        //   offset 1: detail (u8) = keycode
+        //   offset 2: sequence (u16, little-endian)
+        //   offset 4: time (u32, little-endian)
+        //   offset 8: root (u32)
+        //   offset 12: event (u32) = window receiving the event
+        //   offset 16: child (u32)
+        //   offset 20: root_x (i16)
+        //   offset 22: root_y (i16)
+        //   offset 24: event_x (i16)
+        //   offset 26: event_y (i16)
+        //   offset 28: state (u16) = modifier mask
+        //   offset 30: same_screen (u8)
+        //   offset 31: padding (u8)
+        let mut buf = [0u8; 32];
+        buf[0] = response_type;
+        buf[1] = x_keycode;
+        // sequence = 0 (offset 2-3, already 0)
+        // time = CURRENT_TIME (offset 4-7, already 0)
+        // root (offset 8-11)
+        buf[8..12].copy_from_slice(&self.root.to_ne_bytes());
+        // event (offset 12-15)
+        buf[12..16].copy_from_slice(&xid.to_ne_bytes());
+        // child = 0 (offset 16-19)
+        // root_x, root_y = 0 (offset 20-23)
+        // event_x, event_y = 0 (offset 24-27)
+        // state = 0 (offset 28-29)
+        buf[30] = 1; // same_screen = true
+
+        x11rb::protocol::xproto::send_event(
+            &self.conn,
+            false, // propagate
+            xid,   // destination
+            x11rb::protocol::xproto::EventMask::KEY_PRESS | x11rb::protocol::xproto::EventMask::KEY_RELEASE,
+            buf,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Закрывает X-окно корректно:
     ///   1. Если окно поддерживает WM_DELETE_WINDOW protocol — отправляем
     ///      ClientMessage с WM_DELETE_WINDOW. Приложение получает событие и
     ///      может закрыться само (с сохранением состояния и т.д.).
+    ///      Также отправляем WM_SAVE_YOURSELF чтобы приложение могло
+    ///      сохранить состояние перед закрытием.
     ///   2. Иначе — destroy_window(). Это жёсткое закрытие, приложение не
     ///      получает шанса очистить ресурсы. Но для некоторых старых/простых
     ///      приложений (xterm без WM_PROTOCOLS) это единственный способ.
+    ///   3. Если WM_DELETE_WINDOW отправлен но окно не закрылось —
+    ///      принудительно destroy_window() как fallback.
     pub fn close_window(&mut self, xid: u32) -> Result<()> {
         let atoms = self.atoms();
         let supports_delete = self.window_supports_wm_delete(xid);
@@ -597,19 +661,41 @@ impl X11Compositor {
                 x11rb::protocol::xproto::EventMask::NO_EVENT,
                 msg,
             )?;
+            self.conn.flush()?;
             log::info!("X sent WM_DELETE_WINDOW to 0x{:x}", xid);
+
+            // Даём приложению время на обработку WM_DELETE_WINDOW.
+            // Если через 200мс окно ещё живо — force destroy.
+            // Это решает проблему "не закрывается" для приложений, которые
+            // либо не обрабатывают ClientMessage корректно, либо зависли.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if self.window_exists(xid) {
+                log::warn!("X window 0x{:x} still alive after WM_DELETE_WINDOW — force destroying", xid);
+                let _ = x11rb::protocol::xproto::destroy_window(&self.conn, xid);
+                self.conn.flush()?;
+            }
         } else {
-            // Force destroy.
+            // Force destroy — приложение не поддерживает WM_DELETE_WINDOW.
             x11rb::protocol::xproto::destroy_window(&self.conn, xid)?;
+            self.conn.flush()?;
             log::info!("X destroyed window 0x{:x} (no WM_DELETE_WINDOW)", xid);
         }
-        self.conn.flush()?;
 
         // Clear focus if we just closed the focused window.
         if self.focused_xid == Some(xid) {
             self.focused_xid = None;
         }
         Ok(())
+    }
+
+    /// Проверяет, существует ли ещё X-окно на сервере.
+    /// Используется в close_window для fallback destroy.
+    fn window_exists(&self, xid: u32) -> bool {
+        use x11rb::protocol::xproto::{get_window_attributes, ConnectionExt};
+        match get_window_attributes(&self.conn, xid) {
+            Ok(c) => c.reply().is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Проверяет, поддерживает ли окно WM_DELETE_WINDOW protocol.

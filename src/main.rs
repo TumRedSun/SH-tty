@@ -920,19 +920,15 @@ fn run_wm(
                             std::thread::spawn(move || {
                                 let _ = launcher::Launcher::launch(&entry, &display, &shell);
                             });
-                            // Если графическое — создаём X11 tile.
-                            if !is_terminal && x11.is_some() {
-                                let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
-                                pending_x11_tile = Some(new_id);
-                                // Trigger new-window animation.
-                                let screen_rect = Rect { x: 0, y: 0, w: canvas.width, h: canvas.height };
-                                let tile_rect = workspaces.current_layout().tile_rects(screen_rect)
-                                    .into_iter().find(|(id, _, _)| *id == new_id)
-                                    .map(|(_, _, r)| r);
-                                if let Some(r) = tile_rect {
-                                    animations.start_new_window(r, &current_cfg.animations);
-                                }
-                            } else if is_terminal {
+                            // Если графическое — НЕ создаём пустой X11 tile заранее.
+                            // Раньше мы создавали tile сразу и хранили в pending_x11_tile,
+                            // но это порождало "фантомное" окно с заголовком "x11" —
+                            // оно не получало keyboard input (нет привязанного X-окна),
+                            // не закрывалось (close_focused не находил binding), и
+                            // пользователь видел два "окна" вместо одного.
+                            // Теперь tile создаётся автоматически когда X-клиент
+                            // создаст своё окно (MapNotify → auto_place_windows).
+                            if is_terminal {
                                 // Терминальное приложение — создаём нативный терминал.
                                 let new_id = workspaces.current_layout_mut().open_tile(TileKind::Terminal, Direction::Horizontal);
                                 let (tc, tr) = calc_terminal_size(&canvas, &font, &current_cfg);
@@ -954,6 +950,8 @@ fn run_wm(
                                     animations.start_new_window(r, &current_cfg.animations);
                                 }
                             }
+                            // Для X11 приложений — не делаем ничего здесь.
+                            // tile будет создан когда X-клиент откроет окно.
                         }
                         continue;
                     }
@@ -979,14 +977,18 @@ fn run_wm(
                             // клавишу в X-сервер через XTest (X keycode = evdev + 8).
                             // XTest fake_input отправляет событие в окно с input
                             // focus, который мы установили через set_input_focus.
-                            let is_x11_tile = x11.as_ref()
+                            let x11_xid = x11.as_ref()
                                 .and_then(|x| x.tile_window(focused_id.0))
-                                .is_some();
-                            if is_x11_tile {
+                                .map(|xwid| xwid.0);
+                            if let Some(xid) = x11_xid {
                                 if let Some(x) = x11.as_ref() {
                                     if let Err(e) = x.send_key(evdev_keycode as u32, true) {
-                                        log::debug!("X11 send_key(press, kc={}) failed: {}",
+                                        // XTest failed — пробуем fallback через XSendEvent.
+                                        // Это менее надёжно (некоторые приложения
+                                        // игнорируют synthetic events), но лучше чем ничего.
+                                        log::debug!("X11 send_key(press, kc={}) failed: {} — trying XSendEvent fallback",
                                             evdev_keycode, e);
+                                        let _ = x.send_key_via_send_event(xid, evdev_keycode as u32, true);
                                     }
                                 }
                             } else if let Some(tile) = terminals.get_mut(&focused_id) {
@@ -1021,12 +1023,15 @@ fn run_wm(
                     // ломает следующую букву).
                     if !keyboard.super_ && !resize_mode && !launcher.visible {
                         if let Some(focused_id) = workspaces.current_layout().focused {
-                            let is_x11_tile = x11.as_ref()
+                            let x11_xid = x11.as_ref()
                                 .and_then(|x| x.tile_window(focused_id.0))
-                                .is_some();
-                            if is_x11_tile {
+                                .map(|xwid| xwid.0);
+                            if let Some(xid) = x11_xid {
                                 if let Some(x) = x11.as_ref() {
-                                    let _ = x.send_key(evdev_keycode as u32, false);
+                                    if let Err(_) = x.send_key(evdev_keycode as u32, false) {
+                                        // XTest failed — fallback через XSendEvent.
+                                        let _ = x.send_key_via_send_event(xid, evdev_keycode as u32, false);
+                                    }
                                 }
                             }
                         }
@@ -1508,11 +1513,19 @@ fn execute_action(
             }
         }
         SpawnX11 { cmd, args } => {
+            // НЕ создаём пустой X11 tile заранее — это порождало "фантомное"
+            // окно с заголовком "x11" без содержимого, без keyboard input,
+            // и не закрывалось. Tile будет создан автоматически когда X-клиент
+            // откроет окно (MapNotify → auto_place_windows в poll_events).
             if let Some(x) = x11.as_mut() {
-                let new_id = workspaces.current_layout_mut().open_tile(TileKind::X11, Direction::Horizontal);
-                *pending_x11_tile = Some(new_id);
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 let _ = x.launch_client(&cmd, &args_ref);
+                // Запоминаем что мы только что запустили X11 клиент —
+                // если auto_place_windows выключен, нам всё же нужно создать
+                // tile когда окно появится. pending_x11_tile здесь не устанавливаем
+                // (нет предсозданного tile), но auto_place_windows=true (дефолт)
+                // создаст tile автоматически.
+                let _ = pending_x11_tile;
             }
         }
         SpawnTerminal { cmd, args } => {
