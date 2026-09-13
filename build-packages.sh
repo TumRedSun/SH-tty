@@ -22,7 +22,7 @@ mkdir -p "${PKG_DIR}"
 
 # Версия из Cargo.toml (автоматически, не hardcoded).
 VERSION=$(grep '^version' "${SCRIPT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-PKGNAME="superhot-tty"
+PKGNAME="shtty"
 
 echo_blue()   { echo -e "\e[34m$*\e[0m"; }
 echo_green()  { echo -e "\e[32m$*\e[0m"; }
@@ -62,9 +62,9 @@ build_pacman() {
     local tmpdir
     tmpdir=$(mktemp -d)
     cp "${SCRIPT_DIR}/packaging/arch/PKGBUILD" "${tmpdir}/"
-    cp "${SCRIPT_DIR}/packaging/arch/superhot-tty.install" "${tmpdir}/"
+    cp "${SCRIPT_DIR}/packaging/arch/shtty.install" "${tmpdir}/"
     # Создаём tarball исходников (без .git, target).
-    local src_tar="${tmpdir}/${PKGNAME:-superhot-tty}-${VERSION}.tar.gz"
+    local src_tar="${tmpdir}/${PKGNAME:-shtty}-${VERSION}.tar.gz"
     tar czf "${src_tar}" \
         --exclude='.git' --exclude='target' --exclude='*.deb' --exclude='*.rpm' \
         -C "${SCRIPT_DIR}/.." "$(basename "${SCRIPT_DIR}")"
@@ -89,11 +89,11 @@ build_deb() {
         cargo install cargo-deb 2>&1 || { echo_red "Failed to install cargo-deb"; return 1; }
     fi
     cd "${SCRIPT_DIR}"
-    cargo deb --output "${PKG_DIR}/superhot-tty_${VERSION}_amd64.deb" 2>&1 || {
+    cargo deb --output "${PKG_DIR}/shtty_${VERSION}_amd64.deb" 2>&1 || {
         echo_yellow "cargo-deb failed, trying fpm fallback..."
         build_with_fpm "deb"
     }
-    echo_green "==> .deb package: ${PKG_DIR}/superhot-tty_${VERSION}_amd64.deb"
+    echo_green "==> .deb package: ${PKG_DIR}/shtty_${VERSION}_amd64.deb"
 }
 
 # 4. .rpm package (Fedora/RHEL/openSUSE).
@@ -122,11 +122,11 @@ build_with_fpm() {
     fi
     cd "${SCRIPT_DIR}"
     fpm -s dir -t "${fmt}" \
-        -n superhot-tty \
+        -n shtty \
         -v "${VERSION}" \
         --license MIT \
         --url "https://github.com/TumRedSun/SH-tty" \
-        --description "SuperHot MCD-styled TTY window manager" \
+        --description "Tile-based TTY window manager with X11 embedding" \
         --depends systemd \
         --depends zsh \
         --depends xserver-xephyr \
@@ -135,20 +135,20 @@ build_with_fpm() {
         --depends wireplumber \
         --depends xdg-desktop-portal \
         --depends libpam0g \
-        target/release/superhot-tty=/usr/local/bin/superhot-tty \
-        systemd/superhot-tty@.service=/etc/systemd/system/superhot-tty@.service \
-        config/default.toml=/etc/SH-tty/config.toml \
-        skel/zshrc.example=/usr/share/SH-tty/skel/zshrc.example \
-        -p "${PKG_DIR}/superhot-tty_${VERSION}.${fmt}"
+        target/release/shtty=/usr/local/bin/shtty \
+        systemd/shtty@.service=/etc/systemd/system/shtty@.service \
+        config/default.toml=/etc/shtty/config.toml \
+        skel/zshrc.example=/usr/share/shtty/skel/zshrc.example \
+        -p "${PKG_DIR}/shtty_${VERSION}.${fmt}"
 }
 
 # 5. Упаковка в один архив.
 make_archive() {
     echo_blue "==> Creating combined archive..."
     cd "${PKG_DIR}"
-    tar czf "superhot-tty-packages-${VERSION}.tar.gz" *.pkg.tar.zst *.deb *.rpm 2>/dev/null || \
-    tar czf "superhot-tty-packages-${VERSION}.tar.gz" * 2>/dev/null || true
-    echo_green "==> Combined: ${PKG_DIR}/superhot-tty-packages-${VERSION}.tar.gz"
+    tar czf "shtty-packages-${VERSION}.tar.gz" *.pkg.tar.zst *.deb *.rpm 2>/dev/null || \
+    tar czf "shtty-packages-${VERSION}.tar.gz" * 2>/dev/null || true
+    echo_green "==> Combined: ${PKG_DIR}/shtty-packages-${VERSION}.tar.gz"
 }
 
 # 6. Main.

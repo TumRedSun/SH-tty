@@ -1,4 +1,4 @@
-//! Rofi-подобный launcher в стиле SuperHot MCD.
+//! Rofi-подобный launcher.
 //!
    //! При активации (Super+D) открывает popup, читает .desktop файлы из
 //! стандартных директорий + кастомные записи из конфига. Пользователь
@@ -155,18 +155,10 @@ impl Launcher {
         // BG.
         canvas.fill_rect(px, py, popup_w, popup_h, theme.popup_bg);
 
-        // Glitch border (RGB-сдвиг).
-        for (offset, color) in [
-            (-2i32, Color(0xFF, 0x00, 0x00)),
-            (0,    Color(0x00, 0xFF, 0x00)),
-            (2,    Color(0x00, 0xC0, 0xFF)),
-        ] {
-            canvas.rect_outline(px + offset, py, popup_w, popup_h, 1, color);
-        }
         // Main border.
         canvas.rect_outline(px, py, popup_w, popup_h, 2, theme.accent_magenta);
 
-        // Corner brackets (MCD style).
+        // Corner brackets.
         let cs: u32 = 16;
         canvas.fill_rect(px, py, cs, 3, theme.accent_magenta);
         canvas.fill_rect(px, py, 3, cs, theme.accent_magenta);
@@ -181,15 +173,16 @@ impl Launcher {
         let text = TextRenderer::new(canvas, font);
         let header_y = py + 10;
         text.draw_text(px + 12, header_y, "RUN", theme.accent_cyan, None);
-        text.draw_text(px + 50, header_y, "// superhot launcher", theme.fg_dim, None);
+        text.draw_text(px + 50, header_y, "// shtty launcher", theme.fg_dim, None);
 
         // Query line.
         let qy = header_y + fh + 4;
         canvas.fill_rect(px + 8, qy - 2, popup_w - 16, fh as u32 + 4, Color(0x05, 0x03, 0x10));
         let prompt = format!("> {}", self.query);
         text.draw_text(px + 12, qy, &prompt, theme.accent_magenta, None);
-        // blinking cursor
-        let cursor_x = px + 12 + (prompt.len() as i32 + 1) * fw;
+        // blinking cursor — chars().count() (не len(), который считает байты:
+        // кириллический запрос сдвигал курсор внутрь текста)
+        let cursor_x = px + 12 + ((prompt.chars().count() as i32) + 1) * fw;
         canvas.fill_rect(cursor_x, qy, fw as u32, fh as u32, theme.accent_magenta);
 
         // Entries.
@@ -242,7 +235,7 @@ impl Launcher {
             cmd.args(["-c", &full_cmd]);
             cmd.env("DISPLAY", display);
             cmd.env("XDG_SESSION_TYPE", "x11");
-            cmd.env("XDG_CURRENT_DESKTOP", "superhot");
+            cmd.env("XDG_CURRENT_DESKTOP", "shtty");
             cmd.env("TERM", "xterm-256color");
             cmd.spawn()?;
             log::info!("launched (terminal) '{}' via {}", entry.exec, terminal_shell);
@@ -250,7 +243,7 @@ impl Launcher {
             let mut cmd = Command::new(&entry.exec);
             cmd.env("DISPLAY", display);
             cmd.env("XDG_SESSION_TYPE", "x11");
-            cmd.env("XDG_CURRENT_DESKTOP", "superhot");
+            cmd.env("XDG_CURRENT_DESKTOP", "shtty");
             cmd.spawn()?;
             log::info!("launched (x11) '{}'", entry.exec);
         }

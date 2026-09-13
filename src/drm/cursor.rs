@@ -77,8 +77,8 @@ impl HardwareCursor {
 
         // Создаём dumb buffer для курсора.
         let dumb = create_dumb_buffer(drm_fd, width, height)?;
-        // Инициализируем курсор ARGB пикселями (MCD-styled crosshair).
-        let cursor = Self::default_mcd_cursor(width, height);
+        // Инициализируем курсор ARGB пикселями (crosshair).
+        let cursor = Self::default_crosshair_cursor(width, height);
         unsafe {
             std::ptr::copy_nonoverlapping(
                 cursor.as_ptr() as *const u8,
@@ -184,8 +184,8 @@ impl HardwareCursor {
         self.set_bo()
     }
 
-    /// Дефолтный MCD-styled курсор: неоновый крестик с магента-центром.
-    fn default_mcd_cursor(w: u32, h: u32) -> Vec<u32> {
+    /// Дефолтный курсор: неоновый крестик с магента-центром.
+    fn default_crosshair_cursor(w: u32, h: u32) -> Vec<u32> {
         let mut buf = vec![0u32; (w * h) as usize];
         let cx = (w / 2) as i32;
         let cy = (h / 2) as i32;

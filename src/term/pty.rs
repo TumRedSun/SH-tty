@@ -89,8 +89,8 @@ impl Pty {
                 if std::env::var("LANG").is_err() {
                     std::env::set_var("LANG", "en_US.UTF-8");
                 }
-                // Подсказываем zsh что мы в superhot-tty (для темы оформления).
-                std::env::set_var("SUPERHOT_TTY", "1");
+                // Подсказываем zsh что мы в shtty (для темы оформления).
+                std::env::set_var("SHTTY", "1");
 
                 let shell_c = CString::new(shell).unwrap();
                 let arg0 = if shell.ends_with("bash") || shell.ends_with("zsh") {

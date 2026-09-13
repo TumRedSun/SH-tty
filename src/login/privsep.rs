@@ -1,10 +1,10 @@
-//! Privilege separation: login screen runs as unprivileged `superhot-tty`
+//! Privilege separation: login screen runs as unprivileged `shtty`
 //! user, PAM authentication happens in the root parent process.
 //!
 //! Architecture:
 //!   1. main() starts as root, opens DRM/input fds (need root for DRM master
 //!      and /dev/input/event* access).
-//!   2. fork() — child drops to "superhot-tty" system user, runs login UI
+//!   2. fork() — child drops to "shtty" system user, runs login UI
 //!      using inherited fds. Parent stays root.
 //!   3. Child sends credentials to parent via socketpair; parent does PAM
 //!      auth and sends back result.
@@ -23,7 +23,7 @@ use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 
 /// Default unprivileged user for the login screen.
-pub const LOGIN_USER: &str = "superhot-tty";
+pub const LOGIN_USER: &str = "shtty";
 
 /// Message types exchanged over the privsep socket.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -46,7 +46,7 @@ pub enum PrivsepMessage {
     Quit,
 }
 
-/// Drop privileges to the `superhot-tty` system user.
+/// Drop privileges to the `shtty` system user.
 ///
 /// Must be called in the child process immediately after fork, BEFORE any
 /// untrusted code runs (rendering, input parsing, etc.).

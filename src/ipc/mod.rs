@@ -2,7 +2,7 @@
 //!
 //! Безопасность:
 //!   1. IPC запускается ТОЛЬКО после успешного входа пользователя, в процессе
-//!      запущенном от имени вошедшего пользователя (не root, не superhot-tty).
+//!      запущенном от имени вошедшего пользователя (не root, не shtty).
 //!   2. Сокет создаётся с правами 0600 (только владелец).
 //!   3. Каждое входящее соединение проверяется через SO_PEERCRED — принимаются
 //!      только соединения от того же uid, под которым крутится WM.
@@ -248,11 +248,11 @@ fn resolve_socket_path(cfg: &IpcCfg) -> Result<PathBuf> {
     }
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         if !xdg.is_empty() {
-            return Ok(PathBuf::from(format!("{}/superhot-tty.sock", xdg)));
+            return Ok(PathBuf::from(format!("{}/shtty.sock", xdg)));
         }
     }
     let uid = unsafe { libc::getuid() };
-    Ok(PathBuf::from(format!("/tmp/superhot-tty-{}.sock", uid)))
+    Ok(PathBuf::from(format!("/tmp/shtty-{}.sock", uid)))
 }
 
 /// Парсер i3-msg-совместимых команд в Action WM.

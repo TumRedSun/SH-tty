@@ -1,8 +1,11 @@
 //! Login screen с PAM аутентификацией (через privilege separation).
 //!
-//! Поток (см. privsep.rs):
+//! Поток экрана: ввод логина → Enter → ввод пароля → Enter → вход.
+//! Никаких приветственных экранов — сразу поля ввода.
+//!
+//! Поток привилегий (см. privsep.rs):
 //!   1. main() запускается от root, открывает DRM/input, fork().
-//!   2. Ребёнок drop_to_login_user() → "superhot-tty", показывает login screen.
+//!   2. Ребёнок drop_to_login_user() → "shtty", показывает login screen.
 //!   3. При вводе credentials ребёнок отправляет их родителю (root) через
 //!      socketpair; родитель делает PAM auth, возвращает результат.
 //!   4. При успехе ребёнок выходит; родитель drop_to_user(target), запускает WM
@@ -21,13 +24,11 @@ use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginState {
-    Welcome,
     Username,
     Password,
     Authenticating,
     Success,
     Error,
-    Quit,
 }
 
 /// Применяет Shift к символу: a→A, 1→!, etc.
@@ -59,7 +60,7 @@ pub struct LoginScreen {
 impl LoginScreen {
     pub fn new() -> Self {
         LoginScreen {
-            state: LoginState::Welcome,
+            state: LoginState::Username,
             username: String::new(),
             password: String::new(),
             error_msg: String::new(),
@@ -79,13 +80,6 @@ impl LoginScreen {
         // This matches standard PC keyboard behavior.
         let letter_upper = shift ^ caps_lock;
         match self.state {
-            LoginState::Welcome => {
-                if key == "Return" || key == "space" {
-                    self.state = LoginState::Username;
-                } else if key == "Escape" {
-                    self.state = LoginState::Quit;
-                }
-            }
             LoginState::Username => {
                 match key {
                     "Return" => {
@@ -96,7 +90,6 @@ impl LoginScreen {
                     "BackSpace" => { self.username.pop(); }
                     "Escape" => {
                         self.username.clear();
-                        self.state = LoginState::Welcome;
                     }
                     c if c.len() == 1 && c.chars().all(|ch| ch.is_ascii_graphic()) => {
                         if self.username.len() < 32 {
@@ -122,8 +115,7 @@ impl LoginScreen {
                     "BackSpace" => { self.password.pop(); }
                     "Escape" => {
                         self.password.clear();
-                        self.username.clear();
-                        self.state = LoginState::Welcome;
+                        self.state = LoginState::Username;
                     }
                     // Space is a valid password character — must handle
                     // explicitly because key_to_string(Key::Space) returns
@@ -155,10 +147,9 @@ impl LoginScreen {
             }
             LoginState::Error => {
                 if key == "Return" || key == "Escape" {
-                    self.username.clear();
                     self.password.clear();
                     self.error_msg.clear();
-                    self.state = LoginState::Welcome;
+                    self.state = LoginState::Username;
                 }
             }
             _ => {}
@@ -173,91 +164,89 @@ impl LoginScreen {
 
         canvas.fill(theme.bg);
 
-        let glitch = 0.15f32;
-        if glitch > 0.0 {
-            for i in 0..20 {
-                let y = (i * 40 + (self.cursor_blink as i32 / 4) as usize) as i32 % screen_h as i32;
-                canvas.fill_rect(0, y, screen_w, 1, theme.tile_bg_inactive);
-            }
-        }
-
         let text = TextRenderer::new(canvas, font);
         let title = cfg.effective_title();
         let subtitle = cfg.effective_subtitle();
 
+        // Центрирование по chars().count() — len() считает байты, и строки
+        // с кириллицей ("Логин:", подсказки) центрировались со сдвигом.
+        let w_cells = |s: &str, scale: i32| (s.chars().count() as i32) * fw * scale;
+
         let title_color = cfg.title_color.as_ref()
             .map(|s| { let (r,g,b) = crate::config::parse_color(s); crate::ui::theme::Color(r,g,b) })
             .unwrap_or(theme.accent_magenta);
-        let title_x = (screen_w as i32 - (title.len() as i32) * fw * 3) / 2;
-        let title_y = (screen_h as i32 / 2) - fh * 4;
+        let title_x = (screen_w as i32 - w_cells(&title, 3)) / 2;
+        let title_y = (screen_h as i32 / 2) - fh * 5;
         draw_large_text(canvas, font, &title, title_x, title_y, title_color, 3);
 
-        let sub_x = (screen_w as i32 - (subtitle.len() as i32) * fw) / 2;
+        let sub_x = (screen_w as i32 - w_cells(&subtitle, 1)) / 2;
         let sub_y = title_y + fh * 3 + 10;
         text.draw_text(sub_x, sub_y, &subtitle, theme.fg_dim, None);
 
         if cfg.show_clock {
             let now = chrono_now();
-            let clock_x = (screen_w as i32 - (now.len() as i32) * fw) / 2;
+            let clock_x = (screen_w as i32 - w_cells(&now, 1)) / 2;
             text.draw_text(clock_x, sub_y + fh + 8, &now, theme.accent_cyan, None);
         }
 
         let center_y = screen_h as i32 / 2 + fh * 2;
         match self.state {
-            LoginState::Welcome => {
-                if cfg.show_hint {
-                    let hint = if cfg.language == "ru" { "Нажмите Enter для входа" } else { "Press Enter to login" };
-                    let hint_x = (screen_w as i32 - (hint.len() as i32) * fw) / 2;
-                    let blink = (self.cursor_blink / 30) % 2 == 0;
-                    if blink {
-                        text.draw_text(hint_x, center_y, hint, theme.accent_cyan, None);
-                    }
-                }
-            }
             LoginState::Username => {
                 let label = if cfg.language == "ru" { "Логин:" } else { "Login:" };
                 let prompt = format!("{} {}", label, self.username);
-                let prompt_x = (screen_w as i32 - (prompt.len() as i32 + 1) * fw) / 2;
+                let prompt_x = (screen_w as i32 - w_cells(&prompt, 1)) / 2;
                 text.draw_text(prompt_x, center_y, &prompt, theme.fg_default, None);
-                let cx = prompt_x + (prompt.len() as i32) * fw;
+                let cx = prompt_x + (prompt.chars().count() as i32) * fw;
                 if (self.cursor_blink / 30) % 2 == 0 {
                     canvas.fill_rect(cx, center_y, fw as u32, fh as u32, theme.accent_magenta);
+                }
+                if cfg.show_hint {
+                    let hint = if cfg.language == "ru" { "Enter — продолжить, Esc — сбросить" }
+                               else { "Enter — continue, Esc — reset" };
+                    let hx = (screen_w as i32 - w_cells(&hint, 1)) / 2;
+                    text.draw_text(hx, center_y + fh + 6, hint, theme.fg_dim, None);
                 }
             }
             LoginState::Password => {
                 let label = if cfg.language == "ru" { "Пароль:" } else { "Password:" };
-                let hidden: String = "*".repeat(self.password.len());
+                let hidden: String = "*".repeat(self.password.chars().count());
                 let prompt = format!("{} {}", label, hidden);
-                let prompt_x = (screen_w as i32 - (prompt.len() as i32 + 1) * fw) / 2;
+                let prompt_x = (screen_w as i32 - w_cells(&prompt, 1)) / 2;
                 text.draw_text(prompt_x, center_y, &prompt, theme.fg_default, None);
-                let cx = prompt_x + (prompt.len() as i32) * fw;
+                let cx = prompt_x + (prompt.chars().count() as i32) * fw;
                 if (self.cursor_blink / 30) % 2 == 0 {
                     canvas.fill_rect(cx, center_y, fw as u32, fh as u32, theme.accent_magenta);
+                }
+                if cfg.show_hint {
+                    let hint = if cfg.language == "ru" { "Enter — войти, Esc — назад" }
+                               else { "Enter — login, Esc — back" };
+                    let hx = (screen_w as i32 - w_cells(&hint, 1)) / 2;
+                    text.draw_text(hx, center_y + fh + 6, hint, theme.fg_dim, None);
                 }
             }
             LoginState::Authenticating => {
                 let msg = if cfg.language == "ru" { "Проверка..." } else { "Authenticating..." };
-                let mx = (screen_w as i32 - (msg.len() as i32) * fw) / 2;
+                let mx = (screen_w as i32 - w_cells(&msg, 1)) / 2;
                 text.draw_text(mx, center_y, msg, theme.accent_cyan, None);
             }
             LoginState::Error => {
                 let msg = &self.error_msg;
-                let mx = (screen_w as i32 - (msg.len() as i32) * fw).max(0) / 2;
-                let box_w = ((msg.len() as i32 + 4) * fw).min(screen_w as i32 - 40);
+                let msg_cells = msg.chars().count() as i32;
+                let mx = (screen_w as i32 - msg_cells * fw).max(0) / 2;
+                let box_w = ((msg_cells + 4) * fw).min(screen_w as i32 - 40);
                 let box_x = (screen_w as i32 - box_w) / 2;
                 canvas.fill_rect(box_x, center_y - 4, box_w as u32, fh as u32 + 8, theme.popup_bg);
                 canvas.rect_outline(box_x, center_y - 4, box_w as u32, fh as u32 + 8, 2, theme.error);
                 text.draw_text(mx, center_y, msg, theme.error, None);
                 let hint = if cfg.language == "ru" { "Enter — повторить" } else { "Enter — retry" };
-                let hx = (screen_w as i32 - (hint.len() as i32) * fw) / 2;
+                let hx = (screen_w as i32 - w_cells(&hint, 1)) / 2;
                 text.draw_text(hx, center_y + fh + 12, hint, theme.fg_dim, None);
             }
             LoginState::Success => {
                 let msg = if cfg.language == "ru" { "Добро пожаловать!" } else { "Welcome!" };
-                let mx = (screen_w as i32 - (msg.len() as i32) * fw) / 2;
+                let mx = (screen_w as i32 - w_cells(&msg, 1)) / 2;
                 text.draw_text(mx, center_y, msg, theme.accent_cyan, None);
             }
-            LoginState::Quit => {}
         }
 
         let cs: i32 = 32;

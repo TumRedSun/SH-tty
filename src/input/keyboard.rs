@@ -84,6 +84,7 @@ pub enum KeyEvent {
 /// press — so the login screen stored lowercase instead of uppercase,
 /// silently corrupting passwords with capitals / shifted symbols.
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)] // alt/super_/altgr поля заполняются для будущих use-cases
 pub struct RawKeyEvent {
     pub event: KeyEvent,
     /// Raw evdev keycode (linux/input-event-codes.h). Available for
@@ -178,7 +179,7 @@ impl Keyboard {
             log::warn!("EVIOCGRAB failed: {}", std::io::Error::last_os_error());
         }
         // Read initial Caps Lock LED state so that if Caps Lock is already
-        // on when SH-tty starts (e.g., toggled in a previous session), we
+        // on when shtty starts (e.g., toggled in a previous session), we
         // detect it. Without this, the user's password would silently be
         // the wrong case. EVIOCGLED = _IOR('E', 0x19, u8[len]).
         const EVIOCGLED_1: libc::c_ulong =
@@ -201,6 +202,7 @@ impl Keyboard {
         })
     }
 
+    #[allow(dead_code)] // superseded by poll_with_keycodes/poll_with_modifiers
     pub fn poll(&mut self) -> Vec<KeyEvent> {
         self.poll_with_keycodes().into_iter().map(|r| r.event).collect()
     }

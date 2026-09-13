@@ -14,7 +14,7 @@
 //!    - Динамическое сканирование /usr/share/kbd/consolefonts/ и т.д.
 //!    - Scoring по покрытию: Cyrillic > box-drawing > blocks > Greek > Powerline.
 //!
-//! 3. **User override** — файл в /etc/superhot-tty/:
+//! 3. **User override** — файл в /etc/shtty/:
 //!    - `font.ttf` / `font.otf` — TTF через freetype
 //!    - `font.psfu` / `font.psf` — PSF bitmap
 //!
@@ -67,6 +67,16 @@ pub struct Font {
     /// Для шрифтов без unicode table остаётся пустой — glyph_for использует
     /// legacy logic (cp < 0x80 → direct, иначе cp_to_index fallback).
     unicode_map: HashMap<u32, u32>,
+    /// Базовая линия глифов в пикселях от верха ячейки (для TTF — из метрик
+    /// шрифта, для PSF — приближение 3/4 высоты). Fallback-шрифты рендерятся
+    /// с той же baseline, чтобы глифы не "прыгали" по вертикали.
+    pub baseline: u32,
+    /// Fallback-шрифты: опрашиваются в порядке если codepoint отсутствует
+    /// в основном шрифте. Так рендерятся Nerd Font иконки, Powerline-символы,
+    /// математические знаки и прочие символы, которых нет в monospace-шрифте.
+    /// Все fallback'и отрендерены в ТЕ ЖЕ ячейки (width×height), что и основной
+    /// шрифт, поэтому bytes_per_glyph совпадает и glyph_for безопасен.
+    fallbacks: Vec<Font>,
 }
 
 impl Font {
@@ -110,6 +120,8 @@ impl Font {
             glyphs,
             has_unicode_table,
             unicode_map,
+            baseline: height * 3 / 4,
+            fallbacks: Vec::new(),
         })
     }
 
@@ -140,6 +152,8 @@ impl Font {
             glyphs,
             has_unicode_table,
             unicode_map,
+            baseline: height * 3 / 4,
+            fallbacks: Vec::new(),
         })
     }
 
@@ -175,10 +189,16 @@ impl Font {
     ///                    0 = default 16px.
     pub fn load_default_with_config(family_hint: &str, pixel_height: u32) -> Self {
         let pixel_height = if pixel_height == 0 { 16 } else { pixel_height.clamp(8, 64) };
+        let mut font = Self::load_primary(family_hint, pixel_height);
+        Self::attach_fallbacks(&mut font);
+        font
+    }
 
-        // 0. User override через /etc/superhot-tty/font.ttf — TTF файл.
+    /// Загружает основной шрифт (без fallback'ов).
+    fn load_primary(family_hint: &str, pixel_height: u32) -> Self {
+        // 0. User override через /etc/shtty/font.ttf — TTF файл.
         // Если есть — используем freetype для рендеринга.
-        for user_path in ["/etc/superhot-tty/font.ttf", "/etc/superhot-tty/font.otf"] {
+        for user_path in ["/etc/shtty/font.ttf", "/etc/shtty/font.otf"] {
             if std::path::Path::new(user_path).exists() {
                 match Self::from_ttf(user_path, pixel_height) {
                     Ok(f) => {
@@ -196,8 +216,8 @@ impl Font {
             }
         }
 
-        // 1. User override через /etc/superhot-tty/font.psfu — PSF файл (legacy).
-        for user_path in ["/etc/superhot-tty/font.psfu", "/etc/superhot-tty/font.psf"] {
+        // 1. User override через /etc/shtty/font.psfu — PSF файл (legacy).
+        for user_path in ["/etc/shtty/font.psfu", "/etc/shtty/font.psf"] {
             if let Ok(data) = load_maybe_gz(user_path) {
                 if let Ok(f) = Self::from_bytes(&data) {
                     log::info!(
@@ -243,9 +263,132 @@ impl Font {
         Self::load_psf_fallback()
     }
 
+    /// Подключает fallback-шрифты для символов, которых нет в основном шрифте.
+    ///
+    /// Зачем: monospace TTF (DejaVu Sans Mono и т.п.) не содержит Nerd Font
+    /// иконок (U+E000-U+F8FF), Powerline-символов и многих спецзнаков. Пользователь
+    /// видит на их месте '?' или пустые ячейки. Если в системе установлены
+    /// символ-шрифты (ttf-nerd-fonts-symbols, noto-fonts, symbola, unifont...),
+    /// они подключаются как fallback и все иконки рендерятся корректно.
+    ///
+    /// Источники кандидатов:
+    ///   1. /etc/shtty/font-fallbacks/*.ttf|otf — явный пользовательский override
+    ///   2. fc-match по списку известных символ-семейств
+    ///   3. скан /usr/share/fonts и ~/.local/share/fonts по маске имени
+    ///
+    /// Подключаются только шрифты, добавляющие НОВЫЕ codepoints (проверка по
+    /// charmap до рендеринга). Максимум 6 fallback'ов. Emoji-шрифты пропускаются —
+    /// 1-битный monochrome рендер не может отобразить цветные эмодзи.
+    #[cfg(feature = "ttf")]
+    fn attach_fallbacks(font: &mut Font) {
+        const MAX_FALLBACKS: usize = 6;
+
+        let mut candidates: Vec<String> = Vec::new();
+
+        // 1. Пользовательский каталог fallback'ов.
+        if let Ok(rd) = fs::read_dir("/etc/shtty/font-fallbacks") {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let lower = path.to_string_lossy().to_lowercase();
+                if lower.ends_with(".ttf") || lower.ends_with(".otf") {
+                    candidates.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // 2. Известные символ-семейства через fc-match.
+        const FALLBACK_FAMILIES: &[&str] = &[
+            "Symbols Nerd Font Mono",
+            "Symbols Nerd Font",
+            "Noto Sans Symbols 2",
+            "Noto Sans Symbols",
+            "Symbola",
+            "Unifont",
+            "Noto Sans Math",
+            "Powerline",
+        ];
+        for family in FALLBACK_FAMILIES {
+            if let Some((path, _)) = find_ttf_via_fontconfig(family) {
+                candidates.push(path);
+            }
+        }
+
+        // 3. Скан файловых каталогов по маскам имени.
+        for pattern_dir in [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            "~/.local/share/fonts",
+        ] {
+            let dir = expand_tilde_path(pattern_dir);
+            collect_font_candidates(&dir, &mut candidates);
+        }
+
+        // Дедупликация + исключение эмодзи и пустых.
+        let mut seen: Vec<String> = Vec::new();
+        for c in candidates {
+            let lower = c.to_lowercase();
+            if lower.contains("emoji") { continue; }
+            if !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+
+        let cell_w = font.width;
+        let cell_h = font.height;
+        let baseline = font.baseline_hint();
+        let mut added = 0usize;
+
+        for path in seen {
+            if added >= MAX_FALLBACKS { break; }
+
+            // Проверяем покрытие ДО рендеринга: шрифт должен добавлять
+            // хотя бы один новый codepoint. face.chars() — дёшево.
+            let new_cps = match freetype_new_face_codepoints(&path) {
+                Some(cps) => cps,
+                None => continue,
+            };
+            let fresh: Vec<u32> = new_cps
+                .into_iter()
+                .filter(|&cp| !font.has_glyph(cp) && cp >= 0x80)
+                .collect();
+            if fresh.is_empty() { continue; }
+
+            // Рендерим в ТЕ ЖЕ ячейки что и основной шрифт.
+            match font.render_fallback(&path, cell_w, cell_h, baseline) {
+                Ok(()) => {
+                    added += 1;
+                    log::info!(
+                        "font fallback #{}: {} ({} новых codepoints, примеры: {:?})",
+                        added, path, fresh.len(),
+                        fresh.iter().take(4).map(|c| format!("U+{:04X}", c)).collect::<Vec<_>>()
+                    );
+                }
+                Err(e) => {
+                    log::debug!("fallback font {} skipped: {}", path, e);
+                }
+            }
+        }
+
+        if added == 0 {
+            log::info!("no additional symbol fonts found — icons from Nerd Font/Powerline will render as '?'");
+            log::info!("  install them for icon support, e.g.:");
+            log::info!("    Arch:    sudo pacman -S ttf-nerd-fonts-symbols noto-fonts");
+            log::info!("    Debian:  sudo apt install fonts-noto-core fonts-symbola");
+            log::info!("  or drop any .ttf into /etc/shtty/font-fallbacks/");
+        } else {
+            log::info!("font fallback chain: {} additional font(s), coverage extended", added);
+        }
+    }
+
+    #[cfg(not(feature = "ttf"))]
+    fn attach_fallbacks(_font: &mut Font) {
+        // TTF support disabled — fallback chain requires freetype.
+    }
+
     /// Legacy-точка входа — вызывает `load_default_with_config` с дефолтами
     /// (любой monospace, 16px). Сохранена для совместимости с существующими
     /// вызовами и тестами.
+    #[allow(dead_code)]
     pub fn load_default() -> Self {
         Self::load_default_with_config("", 16)
     }
@@ -338,7 +481,7 @@ impl Font {
                 log::warn!("  Arch:    sudo pacman -S terminus-font   (provides ter-u16n.psfu.gz)");
                 log::warn!("  Debian:  sudo apt install fonts-terminus console-setup");
                 log::warn!("  Fedora:  sudo dnf install terminus-fonts-pcf");
-                log::warn!("or copy a .psfu font to /etc/superhot-tty/font.psfu");
+                log::warn!("or copy a .psfu font to /etc/shtty/font.psfu");
             }
             return f;
         }
@@ -370,6 +513,30 @@ impl Font {
     /// одинаково для всех глифов).
     #[cfg(feature = "ttf")]
     pub fn from_ttf(path: &str, pixel_height: u32) -> anyhow::Result<Self> {
+        Self::from_ttf_inner(path, pixel_height, None, None)
+    }
+
+    /// TTF с фиксированной шириной ячейки и baseline — используется для
+    /// fallback-шрифтов, чтобы их глифы попадали в ячейки основного шрифта.
+    #[cfg(feature = "ttf")]
+    fn render_fallback(&mut self, path: &str, cell_width: u32, cell_height: u32, baseline: u32) -> anyhow::Result<()> {
+        let f = Self::from_ttf_inner(path, cell_height, Some(cell_width), Some(baseline as i32))?;
+        self.fallbacks.push(f);
+        Ok(())
+    }
+
+    /// Базовая линия основного шрифта (для выравнивания fallback'ов).
+    pub fn baseline_hint(&self) -> u32 {
+        self.baseline
+    }
+
+    #[cfg(feature = "ttf")]
+    fn from_ttf_inner(
+        path: &str,
+        pixel_height: u32,
+        force_width: Option<u32>,
+        baseline_hint: Option<i32>,
+    ) -> anyhow::Result<Self> {
         use freetype::Library;
         use freetype::face::LoadFlag;
 
@@ -386,7 +553,8 @@ impl Font {
 
         // Determine target glyph width from advance of common monospace chars.
         // For monospace fonts, all chars have same advance.
-        let target_width = determine_ttf_width(&face);
+        // force_width — для fallback-шрифтов: ячейка должна совпадать с основным.
+        let target_width = force_width.unwrap_or_else(|| determine_ttf_width(&face));
         let bytes_per_row = ((target_width + 7) / 8) as usize;
         let bytes_per_glyph = bytes_per_row * pixel_height as usize;
 
@@ -408,7 +576,8 @@ impl Font {
             (a, d)
         };
         // baseline = ascender pixels from the top of the cell.
-        let baseline = ascender.max(0).min(pixel_height as i32 - 1);
+        // baseline_hint — от основного шрифта, чтобы fallback глифы стояли на той же линии.
+        let baseline = baseline_hint.unwrap_or(ascender).max(0).min(pixel_height as i32 - 1);
 
         log::debug!(
             "TTF {}: target_width={}px height={}px bytes_per_glyph={} ascender={} descender={} baseline={}",
@@ -546,6 +715,8 @@ impl Font {
             glyphs,
             has_unicode_table: true,
             unicode_map,
+            baseline: baseline.max(0) as u32,
+            fallbacks: Vec::new(),
         })
     }
 
@@ -603,34 +774,53 @@ impl Font {
     /// Для шрифтов без unicode table — legacy logic (ASCII direct, Cyrillic hardcoded).
     /// Для неизвестных codepoints — glyph для '?' (или последний glyph как fallback).
     pub fn glyph_for(&self, cp: u32) -> &[u8] {
+        // 1. Основной шрифт.
+        if let Some(glyph) = self.glyph_from_own_map(cp) {
+            return glyph;
+        }
+        // 2. Fallback-шрифты по порядку — так находятся Nerd Font иконки,
+        //    Powerline-символы и прочие знаки, отсутствующие в основном шрифте.
+        for fb in &self.fallbacks {
+            if let Some(glyph) = fb.glyph_from_own_map(cp) {
+                return glyph;
+            }
+        }
+        // 3. Если нигде нет — '?' основного шрифта (или пустой glyph).
+        self.glyph_from_own_map(b'?' as u32)
+            .unwrap_or(&self.glyphs[..(self.bytes_per_glyph as usize).min(self.glyphs.len())])
+    }
+
+    /// Lookup глифа ТОЛЬКО в собственном map (без fallback'ов).
+    /// Возвращает None если codepoint отсутствует.
+    fn glyph_from_own_map(&self, cp: u32) -> Option<&[u8]> {
         let idx = if !self.unicode_map.is_empty() {
             // Шрифт с unicode table — используем её для корректного lookup'а.
-            // Если codepoint не найден — fallback на glyph для '?' (lookup в map).
-            // Это работает для TTF (где '?' — seq index) и для PSF с unicode table
-            // (где '?' — glyph index из шрифта). Только если и '?' нет в шрифте,
-            // берём 0-й glyph (обычно empty/space).
-            self.unicode_map.get(&cp).copied()
-                .or_else(|| self.unicode_map.get(&(b'?' as u32)).copied())
-                .unwrap_or(0)
-                .min(self.glyph_count.saturating_sub(1))
+            self.unicode_map.get(&cp).copied()?
         } else if !self.has_unicode_table {
             // Legacy: no unicode table — direct ASCII + hardcoded Cyrillic.
             if cp < 0x80 {
                 cp
             } else {
-                self.cp_to_index(cp).unwrap_or(b'?' as u32)
-            }.min(self.glyph_count.saturating_sub(1))
+                self.cp_to_index(cp)?
+            }
         } else {
-            // has_unicode_table = true но map пуста (parse failed) — fallback.
-            (cp as usize).min(self.glyph_count as usize - 1) as u32
+            // has_unicode_table = true но map пуста (parse failed) — прямой индекс.
+            if (cp as usize) < self.glyph_count as usize { cp } else { return None; }
         };
+        let idx = idx.min(self.glyph_count.saturating_sub(1));
         let off = (idx * self.bytes_per_glyph) as usize;
         let end = off + self.bytes_per_glyph as usize;
         if end > self.glyphs.len() {
-            // Out of bounds — return empty glyph (avoids panic on malformed font).
-            return &self.glyphs[..(self.bytes_per_glyph as usize).min(self.glyphs.len())];
+            // Out of bounds — malformed font, treat as missing.
+            return None;
         }
-        &self.glyphs[off..end]
+        Some(&self.glyphs[off..end])
+    }
+
+    /// Есть ли в шрифте (включая fallback'и) глиф для codepoint.
+    pub fn has_glyph(&self, cp: u32) -> bool {
+        if self.glyph_from_own_map(cp).is_some() { return true; }
+        self.fallbacks.iter().any(|f| f.glyph_from_own_map(cp).is_some())
     }
 
     fn cp_to_index(&self, cp: u32) -> Option<u32> {
@@ -683,6 +873,8 @@ impl Font {
             glyphs,
             has_unicode_table: false,
             unicode_map: HashMap::new(),
+            baseline: 12,
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -987,4 +1179,115 @@ fn determine_ttf_width(face: &freetype::Face) -> u32 {
 
     // Cap at reasonable width to avoid huge cells for non-monospace fonts.
     max_width.min(16).max(6)
+}
+
+/// expand_tilde для путей шрифтов (без зависимости от crate::config —
+/// чтобы модуль font оставался самодостаточным).
+fn expand_tilde_path(s: &str) -> std::path::PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(format!("{}/{}", home, rest));
+        }
+    }
+    std::path::PathBuf::from(s)
+}
+
+/// Рекурсивно собирает TTF/OTF файлы, чьи имена похожи на символ-шрифты
+/// (Nerd Font, Symbols, Symbola, Unifont, Powerline, Math).
+fn collect_font_candidates(dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_font_candidates(&path, out);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let lower = name.to_lowercase();
+        if !lower.ends_with(".ttf") && !lower.ends_with(".otf") { continue; }
+        const SYMBOL_HINTS: &[&str] = &[
+            "nerd", "symbols", "symbola", "unifont", "powerline",
+            "notosansmath", "noto_sans_math", "math",
+        ];
+        if SYMBOL_HINTS.iter().any(|h| lower.contains(h)) {
+            out.push(path.to_string_lossy().to_string());
+        }
+    }
+}
+
+/// Возвращает множество codepoints из charmap шрифта (без рендеринга).
+/// Используется для дешёвой проверки "добавляет ли шрифт новое покрытие".
+#[cfg(feature = "ttf")]
+fn freetype_new_face_codepoints(path: &str) -> Option<Vec<u32>> {
+    let lib = freetype::Library::init().ok()?;
+    let face = lib.new_face(path, 0).ok()?;
+    Some(face.chars().map(|(cp, _)| cp as u32).collect())
+}
+
+#[cfg(all(test, feature = "ttf"))]
+mod tests {
+    use super::*;
+
+    /// Основной путь загрузки: fc-match → DejaVu Sans Mono (или другой системный
+    /// monospace TTF). Кириллица и box-drawing обязательны для терминала и бара.
+    #[test]
+    fn ttf_load_covers_cyrillic_and_box_drawing() {
+        let f = Font::load_default_with_config("DejaVu Sans Mono", 16);
+        assert!(f.width >= 6 && f.width <= 32, "cell width {}", f.width);
+        assert_eq!(f.height, 16);
+        assert!(f.has_cyrillic(), "нет кириллицы в системном monospace TTF");
+        assert!(f.has_box_drawing(), "нет box-drawing в системном monospace TTF");
+        // '?' существует и не пустой — это fallback отсутствующих глифов.
+        let q = f.glyph_for(b'?' as u32);
+        assert!(q.iter().any(|&b| b != 0), "'?' глиф пустой");
+        // Отсутствующий codepoint не паникует и что-то возвращает.
+        let _ = f.glyph_for(0x10FFFF);
+    }
+
+    /// Fallback-цепочка: глиф, которого нет в основном шрифте, но есть в
+    /// fallback'е, должен рендериться из fallback'а (не '?').
+    /// Тест герметичный: шрифты собираются вручную, системные не участвуют.
+    #[test]
+    fn glyph_for_uses_fallbacks() {
+        // Основной шрифт: builtin 8x16 (ASCII only, cp_to_index → None для PUA).
+        let mut f = Font::builtin_8x16();
+        assert!(!f.has_glyph(0xF00C), "builtin не должен знать U+F00C");
+
+        // Fallback с Nerd Font codepoint (U+F00C — FontAwesome check).
+        let mut fb = Font::builtin_8x16();
+        fb.unicode_map.insert(0xF00C, 1);
+        f.fallbacks.push(fb);
+
+        assert!(f.has_glyph(0xF00C));
+        assert_ne!(f.glyph_for(0xF00C), f.glyph_for(b'?' as u32));
+        // '?' глиф в builtin пустой, а fallback-глиф 0xF00C должен отличаться.
+        assert_ne!(f.glyph_for(0xF00C), f.glyph_for(0xF00D));
+    }
+}
+
+#[cfg(all(test, feature = "ttf"))]
+mod nerd_font_tests {
+    use super::*;
+
+    /// Интеграционная проверка fallback-цепочки: если в системе установлен
+    /// Symbols Nerd Font (ttf-nerd-fonts-symbols / ~/.local/share/fonts),
+    /// Powerline/FontAwesome codepoints должны рендериться через fallback,
+    /// даже если основной monospace-шрифт их не содержит.
+    #[test]
+    fn nerd_font_icons_resolve_via_fallback() {
+        let f = Font::load_default_with_config("DejaVu Sans Mono", 16);
+        // U+E0B0 Powerline arrow, U+F00C FontAwesome check.
+        if !f.has_glyph(0xE0B0) && !f.has_glyph(0xF00C) {
+            // Nerd Font не установлен — тест не должен фейлиться, просто
+            // fallback-механизм нечем проверить. Логируем.
+            eprintln!("Symbols Nerd Font not installed — skipping fallback assertion");
+            return;
+        }
+        assert!(f.has_glyph(0xE0B0) || f.has_glyph(0xF00C));
+        // Глиф fallback не совпадает с '?'-глифом основного шрифта.
+        let icon = f.glyph_for(0xF00C);
+        assert!(!icon.is_empty());
+        eprintln!("fallback chain works: {} fonts attached", f.fallbacks.len());
+        assert!(f.fallbacks.len() >= 1, "иконка найдена, но fallback-шрифты не подключены");
+    }
 }

@@ -1,16 +1,15 @@
-# ~/.zshrc — пример темы для superhot-tty
-# MCD-стиль: ASCII рамки вокруг prompt, неоновые акценты.
+# ~/.zshrc — пример оформления для shtty.
 #
-# Пользователь может полностью заменить этот файл — superhot-tty только
+# Пользователь может полностью заменить этот файл — shtty только
 # запускает zsh, всё оформление prompt остаётся за пользователем.
 
-# === Цвета MCD палитры ===
+# === Цвета (неоновая палитра по умолчанию) ===
 autoload -U colors && colors
-local MCD_BG=$'\e[48;5;234m'      # глубокий фиолетовый фон
-local MCD_MAGENTA=$'\e[38;5;197m' # неоновая магента
-local MCD_CYAN=$'\e[38;5;51m'     # неоновый циан
-local MCD_DIM=$'\e[38;5;60m'      # тусклый серо-фиолетовый
-local MCD_RESET=$'\e[0m'
+local THEME_BG=$'\e[48;5;234m'      # глубокий фиолетовый фон
+local THEME_MAGENTA=$'\e[38;5;197m' # неоновая магента
+local THEME_CYAN=$'\e[38;5;51m'     # неоновый циан
+local THEME_DIM=$'\e[38;5;60m'      # тусклый серо-фиолетовый
+local THEME_RESET=$'\e[0m'
 
 # === Prompt с ASCII уголками ===
 # ╭─ user@host ~
@@ -65,15 +64,15 @@ case $TERM in
         ;;
 esac
 
-# === superhot-tty welcome ===
-if [[ -n "$SUPERHOT_TTY" ]]; then
+# === shtty welcome ===
+if [[ -n "$SHTTY" ]]; then
     echo ""
-    echo "  ${MCD_MAGENTA}╔════════════════════════════════════════╗${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}║${MCD_CYAN}   SUPERHOT TTY  ${MCD_DIM}v0.2   ${MCD_MAGENTA}             ║${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}╠════════════════════════════════════════╣${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+D${MCD_RESET} launcher    ${MCD_DIM}Mod4+1..9${MCD_RESET} ws    ${MCD_MAGENTA}║${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+Enter${MCD_RESET} term    ${MCD_DIM}Mod4+E${MCD_RESET} X11 tile    ${MCD_MAGENTA}║${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}║${MCD_RESET} ${MCD_DIM}Mod4+Shift+1..9${MCD_RESET} move to ws            ${MCD_MAGENTA}║${MCD_RESET}"
-    echo "  ${MCD_MAGENTA}╚════════════════════════════════════════╝${MCD_RESET}"
+    echo "  ${THEME_MAGENTA}╔════════════════════════════════════════╗${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}║${THEME_CYAN}   shtty  ${THEME_DIM}tile manager  ${THEME_MAGENTA}            ║${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}╠════════════════════════════════════════╣${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}║${THEME_RESET} ${THEME_DIM}Mod4+D${THEME_RESET} launcher    ${THEME_DIM}Mod4+1..9${THEME_RESET} ws    ${THEME_MAGENTA}║${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}║${THEME_RESET} ${THEME_DIM}Mod4+Enter${THEME_RESET} term    ${THEME_DIM}Mod4+E${THEME_RESET} X11 tile    ${THEME_MAGENTA}║${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}║${THEME_RESET} ${THEME_DIM}Mod4+Shift+1..9${THEME_RESET} move to ws            ${THEME_MAGENTA}║${THEME_RESET}"
+    echo "  ${THEME_MAGENTA}╚════════════════════════════════════════╝${THEME_RESET}"
     echo ""
 fi

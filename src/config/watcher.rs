@@ -164,7 +164,6 @@ pub struct ConfigDiff {
     pub theme_changed: bool,
     pub keybindings_changed: bool,
     pub window_rules_changed: bool,
-    pub animations_changed: bool,
     pub ipc_changed: bool,
     pub live_reload_changed: bool,
     pub general_changed: bool,
@@ -181,7 +180,6 @@ impl ConfigDiff {
         d.window_rules_changed = old.window_rules.len() != new.window_rules.len()
             || old.window_rules.iter().zip(new.window_rules.iter())
                 .any(|(a, b)| !window_rule_eq(a, b));
-        d.animations_changed = !animations_eq(&old.animations, &new.animations);
         d.ipc_changed = !ipc_eq(&old.ipc, &new.ipc);
         d.live_reload_changed = !live_reload_eq(&old.live_reload, &new.live_reload);
         d.general_changed = !general_eq(&old.general, &new.general);
@@ -195,7 +193,7 @@ impl ConfigDiff {
 
     pub fn any(&self) -> bool {
         self.theme_changed || self.keybindings_changed || self.window_rules_changed
-            || self.animations_changed || self.ipc_changed || self.live_reload_changed
+            || self.ipc_changed || self.live_reload_changed
             || self.general_changed || self.x11_changed || self.monitors_changed
             || self.bar_changed
     }
@@ -212,25 +210,6 @@ fn theme_eq(a: &crate::config::ThemeCfg, b: &crate::config::ThemeCfg) -> bool {
         && a.error == b.error
 }
 
-fn animations_eq(a: &crate::config::AnimationsCfg, b: &crate::config::AnimationsCfg) -> bool {
-    a.workspace_transition == b.workspace_transition
-        && a.new_window == b.new_window
-        && a.random_glitch == b.random_glitch
-        && a.ws_transition_ms == b.ws_transition_ms
-        && a.ws_manifest_ms == b.ws_manifest_ms
-        && a.ws_reveal_ms == b.ws_reveal_ms
-        && a.new_window_fill_ms == b.new_window_fill_ms
-        && a.new_window_reveal_ms == b.new_window_reveal_ms
-        && a.random_glitch_ms == b.random_glitch_ms
-        && a.random_glitch_every_frames == b.random_glitch_every_frames
-        && a.chars_per_sec == b.chars_per_sec
-        && a.random_chars_per_sec == b.random_chars_per_sec
-        && a.glitch_use_alpha == b.glitch_use_alpha
-        && a.glitch_use_blocks == b.glitch_use_blocks
-        && a.glitch_use_digits == b.glitch_use_digits
-        && a.glitch_color == b.glitch_color
-}
-
 fn ipc_eq(a: &crate::config::IpcCfg, b: &crate::config::IpcCfg) -> bool {
     a.enabled == b.enabled && a.socket_path == b.socket_path && a.socket_mode == b.socket_mode
 }
@@ -245,7 +224,6 @@ fn general_eq(a: &crate::config::General, b: &crate::config::General) -> bool {
         && a.outer_padding == b.outer_padding
         && a.status_bar_height == b.status_bar_height
         && a.framerate == b.framerate
-        && a.glitch_intensity == b.glitch_intensity
         && a.workspace_count == b.workspace_count
 }
 
@@ -292,7 +270,6 @@ pub fn diff_summary(d: &ConfigDiff) -> HashMap<String, bool> {
     m.insert("theme".into(), d.theme_changed);
     m.insert("keybindings".into(), d.keybindings_changed);
     m.insert("window_rules".into(), d.window_rules_changed);
-    m.insert("animations".into(), d.animations_changed);
     m.insert("ipc".into(), d.ipc_changed);
     m.insert("live_reload".into(), d.live_reload_changed);
     m.insert("general".into(), d.general_changed);

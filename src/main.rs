@@ -1,8 +1,8 @@
-//! superhot-tty v0.3 — SuperHot MCD-styled TTY window manager.
+//! shtty — тайловый TTY window manager с собственным login screen.
 //!
 //! Полный стек:
 //!   1. Login screen (PAM) → аутентификация пользователя
-//!   2. Загрузка пользовательского конфига (~/.config/SH-tty/config.toml)
+//!   2. Загрузка пользовательского конфига (~/.config/shtty/config.toml)
 //!   3. Multi-monitor DRM/KMS init (per-monitor workspace binding)
 //!   4. Autostart commands из конфига
 //!   5. Event loop: keyboard/mouse/gamepad → actions → render → flip
@@ -33,7 +33,6 @@ use config::Config;
 use drm::{Backend, MultiMonitorBackend};
 use layout::{Direction, FocusDir, LeafId, Rect, TileKind, border_color_for, workspaces::Workspaces};
 use render::{Canvas, Font, TextRenderer};
-use render::glitch::{AnimationManager, snapshot_workspace};
 use term::{Pty, VTerm};
 use ui::{Theme, Popup as PopupWidget, PixelFmt, Color, Bar};
 use input::{Keyboard, Key, KeyEvent};
@@ -51,9 +50,9 @@ struct TerminalTile {
 /// откатываемся на getty (exit с non-zero кодом, systemd перестанет
 /// перезапускать после StartLimitBurst).
 ///
-/// Состояние: /run/superhot-tty-crashes — файл с timestamp'ами падений,
+/// Состояние: /run/shtty-crashes — файл с timestamp'ами падений,
 /// по одному на строку. /run — tmpfs, очищается при перезагрузке.
-const CRASH_STATE_FILE: &str = "/run/superhot-tty-crashes";
+const CRASH_STATE_FILE: &str = "/run/shtty-crashes";
 const CRASH_WINDOW_SECS: u64 = 60;
 const CRASH_THRESHOLD: usize = 3;
 
@@ -72,10 +71,10 @@ fn check_crash_loop() {
 
     if crashes.len() >= CRASH_THRESHOLD {
         eprintln!("============================================================");
-        eprintln!(" superhot-tty: CRASH LOOP DETECTED");
+        eprintln!(" shtty: CRASH LOOP DETECTED");
         eprintln!(" {} crashes in the last {} seconds.", crashes.len(), CRASH_WINDOW_SECS);
         eprintln!(" Falling back to getty to prevent system lockout.");
-        eprintln!(" To retry: sudo rm {} && sudo systemctl restart superhot-tty@tty1", CRASH_STATE_FILE);
+        eprintln!(" To retry: sudo rm {} && sudo systemctl restart shtty@tty1", CRASH_STATE_FILE);
         eprintln!("============================================================");
 
         restore_getty_tty1();
@@ -104,10 +103,10 @@ fn record_crash() {
 /// install.sh создал чтобы disable getty.
 ///
 /// ВАЖНО: эта функция вызывается из crash-loop детекции. После её вызова
-/// юнит superhot-tty@tty1.service остаётся disabled в systemd database
+/// юнит shtty@tty1.service остаётся disabled в systemd database
 /// (это переживает ребут). Чтобы снова включить — нужно либо переустановить
 /// через install.sh, либо вручную:
-///   sudo systemctl enable superhot-tty@tty1
+///   sudo systemctl enable shtty@tty1
 ///   sudo rm -rf /etc/systemd/system/getty@tty1.service.d
 ///   sudo systemctl disable getty@tty1
 ///   sudo systemctl daemon-reload
@@ -115,17 +114,17 @@ fn restore_getty_tty1() {
     // Логируем через systemd-cat чтобы сообщение точно попало в journal,
     // даже если наш stdio уже сломан. stderr тоже используем на случай,
     // если systemd-cat не установлен.
-    let msg = "superhot-tty: crash loop detected, falling back to getty. To retry: sudo rm /run/superhot-tty-crashes && sudo systemctl enable superhot-tty@tty1 && sudo systemctl restart superhot-tty@tty1";
+    let msg = "shtty: crash loop detected, falling back to getty. To retry: sudo rm /run/shtty-crashes && sudo systemctl enable shtty@tty1 && sudo systemctl restart shtty@tty1";
     eprintln!("============================================================");
-    eprintln!(" superhot-tty: CRASH LOOP DETECTED");
+    eprintln!(" shtty: CRASH LOOP DETECTED");
     eprintln!(" Falling back to getty to prevent system lockout.");
     eprintln!(" To retry:");
-    eprintln!("   sudo rm /run/superhot-tty-crashes");
-    eprintln!("   sudo systemctl enable superhot-tty@tty1");
-    eprintln!("   sudo systemctl restart superhot-tty@tty1");
+    eprintln!("   sudo rm /run/shtty-crashes");
+    eprintln!("   sudo systemctl enable shtty@tty1");
+    eprintln!("   sudo systemctl restart shtty@tty1");
     eprintln!("============================================================");
     let _ = std::process::Command::new("systemd-cat")
-        .args(["-t", "superhot-tty", "-p", "err"])
+        .args(["-t", "shtty", "-p", "err"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .and_then(|mut child| {
@@ -139,7 +138,7 @@ fn restore_getty_tty1() {
     let _ = std::fs::remove_file("/etc/systemd/system/getty@tty1.service.d/override.conf");
     let _ = std::fs::remove_dir("/etc/systemd/system/getty@tty1.service.d");
     let _ = std::process::Command::new("systemctl").args(["enable", "getty@tty1.service"]).output();
-    let _ = std::process::Command::new("systemctl").args(["disable", "superhot-tty@tty1.service"]).output();
+    let _ = std::process::Command::new("systemctl").args(["disable", "shtty@tty1.service"]).output();
     let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).output();
 }
 
@@ -311,8 +310,8 @@ fn main() -> Result<()> {
     // SIGSEGV/SIGBUS handler — логируем и записываем crash перед смертью.
     // catch_unwind не ловит segfault, поэтому нужен signal handler.
     unsafe {
-        libc::signal(libc::SIGSEGV, sigsegv_handler as libc::sighandler_t);
-        libc::signal(libc::SIGBUS, sigsegv_handler as libc::sighandler_t);
+        libc::signal(libc::SIGSEGV, sigsegv_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGBUS, sigsegv_handler as *const () as libc::sighandler_t);
     }
 
     // Panic hook — записываем crash timestamp для crash loop detection.
@@ -325,10 +324,10 @@ fn main() -> Result<()> {
     // Crash loop detection — если падал 3+ раз за 60с, откатываемся на getty.
     check_crash_loop();
 
-    log::info!("superhot-tty v0.5 starting (privilege separation mode)");
+    log::info!("shtty v{} starting (privilege separation mode)", env!("CARGO_PKG_VERSION"));
 
     if unsafe { libc::geteuid() } != 0 {
-        anyhow::bail!("superhot-tty must be started as root — it drops privileges internally");
+        anyhow::bail!("shtty must be started as root — it drops privileges internally");
     }
 
     // === PHASE 1: as root, open privileged resources ===
@@ -398,11 +397,11 @@ fn main() -> Result<()> {
     }
 
     if pid == 0 {
-        // === CHILD: drop to "superhot-tty", run login UI ===
+        // === CHILD: drop to "shtty", run login UI ===
         drop(parent_sock);
 
         login::privsep::drop_to_login_user()
-            .context("failed to drop privileges to superhot-tty user")?;
+            .context("failed to drop privileges to shtty user")?;
 
         let mut login_screen = LoginScreen::new();
         let target_fps = cfg_system.general.framerate.max(1) as u64;
@@ -501,14 +500,6 @@ fn main() -> Result<()> {
                                 login_screen.state = login::LoginState::Error;
                             }
                         }
-                    }
-                    if login_screen.state == login::LoginState::Quit {
-                        let _ = login::privsep::send_message(&mut child_sock,
-                            &login::privsep::PrivsepMessage::Quit);
-                        std::mem::forget(keyboard);
-                        if let Some(mb) = multi_backend { std::mem::forget(mb); }
-                        if let Some(sb) = single_backend { std::mem::forget(sb); }
-                        std::process::exit(1);
                     }
                 }
             }
@@ -637,7 +628,7 @@ fn main() -> Result<()> {
         &mut quit_wm,
     )?;
 
-    log::info!("superhot-tty shutting down");
+    log::info!("shtty shutting down");
     // Возвращаем VT в text mode — иначе после выхода на tty1 будет чёрный экран.
     restore_vt_to_text();
     Ok(())
@@ -791,22 +782,21 @@ fn run_wm(
 
     // Autostart.
     log::info!("running {} autostart entries", cfg.autostart.len());
+    let x11_display = cfg.x11.display.clone();
+    let default_shell = cfg.general.shell.clone();
     for entry in cfg.autostart.clone() {
+        let display = x11_display.clone();
+        let shell = default_shell.clone();
         std::thread::spawn(move || {
             if entry.delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(entry.delay_ms));
             }
-            let _ = run_autostart(&entry);
+            let _ = run_autostart(&entry, &display, &shell);
         });
     }
 
     // Popups.
     let mut popups: Vec<PopupWidget> = Vec::new();
-    // Раньше здесь показывался стартовый popup "SUPERHOT TTY v0.5 — ...".
-    // Он занимал верхнюю часть экрана 4 секунды и закрывал терминал.
-    // Убран по запросу — пользователю нужна чистая стартовая картинка.
-    // Если нужно показать сообщение об ошибке или важное уведомление,
-    // используйте IPC или action popup в keybindings.
 
     // Status bar — полность настраиваемая (polybar/waybar-style).
     // Читает конфиг из [bar] секции config.toml. Поддерживает модули:
@@ -854,13 +844,6 @@ fn run_wm(
         None
     };
 
-    // === Animation manager ===
-    let mut animations = AnimationManager::new();
-    log::info!("animation manager initialized (ws_transition={}, new_window={}, random_glitch={})",
-        cfg.animations.workspace_transition,
-        cfg.animations.new_window,
-        cfg.animations.random_glitch);
-
     // Текущий конфиг (mutable — обновляется при reload).
     let mut current_cfg = cfg;
     let mut current_theme = theme;
@@ -893,9 +876,6 @@ fn run_wm(
                     if diff.theme_changed {
                         current_theme = build_theme(&new_cfg);
                         log::info!("  → theme reloaded");
-                    }
-                    if diff.animations_changed {
-                        log::info!("  → animations params reloaded");
                     }
                     if diff.keybindings_changed {
                         log::info!("  → keybindings reloaded");
@@ -944,7 +924,6 @@ fn run_wm(
                     &font,
                     &mut launcher,
                     &mut current_cfg,
-                    &mut animations,
                 );
                 let _ = resp_tx.send(response);
             }
@@ -1000,14 +979,6 @@ fn run_wm(
                                         title: entry_name,
                                         workspace: workspaces.current,
                                     });
-                                }
-                                // Trigger new-window animation.
-                                let screen_rect = Rect { x: 0, y: 0, w: canvas.width, h: canvas.height };
-                                let tile_rect = workspaces.current_layout().tile_rects(screen_rect)
-                                    .into_iter().find(|(id, _, _)| *id == new_id)
-                                    .map(|(_, _, r)| r);
-                                if let Some(r) = tile_rect {
-                                    animations.start_new_window(r, &current_cfg.animations);
                                 }
                             }
                             // Для X11 приложений — не делаем ничего здесь.
@@ -1099,7 +1070,6 @@ fn run_wm(
                         }
                     }
                 }
-                _ => {}
             }
         }
 
@@ -1128,21 +1098,9 @@ fn run_wm(
             last_x11_focus = desired_x11_focus;
         }
 
-        // Проверяем, изменился ли workspace (через hotkey или IPC).
+        // Отслеживаем смену workspace (через hotkey или IPC) — для логов.
         if workspaces.current != prev_ws {
-            log::debug!("workspace changed: {} → {}, starting ws transition animation",
-                prev_ws, workspaces.current);
-            if current_cfg.animations.workspace_transition {
-                // Snapshot старого ws (предыдущий).
-                let old_prev = prev_ws;
-                // Для snapshot старого ws временно переключаемся назад.
-                let saved_current = workspaces.current;
-                workspaces.current = old_prev;
-                let old_snap = snapshot_workspace(&workspaces, &terminals, &x11, &canvas, &font, &current_theme);
-                workspaces.current = saved_current;
-                let new_snap = snapshot_workspace(&workspaces, &terminals, &x11, &canvas, &font, &current_theme);
-                animations.start_ws_transition(old_snap, new_snap, &current_cfg.animations);
-            }
+            log::debug!("workspace changed: {} → {}", prev_ws, workspaces.current);
             prev_ws = workspaces.current;
         }
 
@@ -1270,17 +1228,6 @@ fn run_wm(
                         Some(new_id)
                     } else { None };
 
-                    // Trigger new-window animation если окно появилось на текущем ws.
-                    if let Some(leaf_id) = assigned_leaf_id {
-                        let screen_rect = Rect { x: 0, y: 0, w: canvas.width, h: canvas.height };
-                        let tile_rect = workspaces.current_layout().tile_rects(screen_rect)
-                            .into_iter().find(|(id, _, _)| *id == leaf_id)
-                            .map(|(_, _, r)| r);
-                        if let Some(r) = tile_rect {
-                            animations.start_new_window(r, &current_cfg.animations);
-                        }
-                    }
-
                     // Если overlay planes включены — пытаемся импортировать dma-buf.
                     if let (Some(leaf_id), Some(ov), Some(ver)) = (assigned_leaf_id, overlay_mgr.as_mut(), dri3_version) {
                         if let Some(xwid) = x.tile_window(leaf_id.0) {
@@ -1312,20 +1259,9 @@ fn run_wm(
             }
         }
 
-        // 5.5 Random glitch — проверяем каждый кадр.
-        animations.maybe_random_glitch(
-            &current_cfg.animations,
-            current_cfg.general.glitch_intensity,
-            canvas.width,
-            canvas.height,
-        );
-
         // 6. Render.
         render_frame(&canvas, &font, &current_theme, &workspaces, &terminals, &x11, &popups,
-            &launcher, &current_cfg, mouse.as_ref(), hw_cursor.as_ref(), &animations, &mut status_bar);
-
-        // 6.5 Tick animations (cleanup finished).
-        animations.tick();
+            &launcher, mouse.as_ref(), hw_cursor.as_ref(), &mut status_bar);
 
         // 7. Flip.
         log::trace!("frame: blit");
@@ -1406,7 +1342,10 @@ fn get_window_info(x: &x11::X11Compositor, xid: u32) -> WindowInfo {
 }
 
 /// Запускает autostart entry.
-fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
+///
+/// `display` и `shell` передаются из конфига (x11.display / general.shell) —
+/// раньше были захардкожены ":1" и "zsh".
+fn run_autostart(entry: &config::AutostartEntry, display: &str, shell: &str) -> std::io::Result<()> {
     match entry.kind.as_str() {
         "command" => {
             let mut cmd = Command::new(&entry.cmd);
@@ -1417,9 +1356,9 @@ fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
         "x11" => {
             let mut cmd = Command::new(&entry.cmd);
             cmd.args(&entry.args)
-                .env("DISPLAY", ":1")
+                .env("DISPLAY", display)
                 .env("XDG_SESSION_TYPE", "x11")
-                .env("XDG_CURRENT_DESKTOP", "superhot");
+                .env("XDG_CURRENT_DESKTOP", "shtty");
             spawn_detached(cmd)?;
             log::info!("autostart (x11): {}", entry.cmd);
         }
@@ -1429,7 +1368,7 @@ fn run_autostart(entry: &config::AutostartEntry) -> std::io::Result<()> {
             } else {
                 format!("{} {}", entry.cmd, entry.args.join(" "))
             };
-            let mut cmd = Command::new("zsh");
+            let mut cmd = Command::new(shell);
             cmd.args(["-c", &format!("exec {}", full_cmd)])
                 .env("TERM", "xterm-256color");
             spawn_detached(cmd)?;
@@ -1734,10 +1673,8 @@ fn render_frame(
     x11: &Option<x11::X11Compositor>,
     popups: &[PopupWidget],
     launcher: &launcher::Launcher,
-    cfg: &Config,
     mouse: Option<&input::Mouse>,
     hw_cursor: Option<&drm::HardwareCursor>,
-    animations: &AnimationManager,
     status_bar: &mut Bar,
 ) {
     canvas.fill(theme.bg);
@@ -1826,9 +1763,6 @@ fn render_frame(
 
     // Status bar — polybar/waybar-style, configured via [bar] in config.toml.
     status_bar.render(canvas, font, theme, workspaces);
-
-    // === Animations (рисуются поверх) ===
-    animations.render(canvas, font, &cfg.animations, theme.accent_cyan);
 
     // Mouse cursor (только если hardware cursor не активен).
     if hw_cursor.is_none() {
@@ -2079,7 +2013,6 @@ fn handle_ipc_request(
     font: &Font,
     launcher: &mut launcher::Launcher,
     cfg: &mut Config,
-    animations: &mut AnimationManager,
 ) -> ipc::IpcResponse {
     use ipc::IpcRequest::*;
     use ipc::IpcResponse;
@@ -2206,11 +2139,6 @@ fn handle_ipc_request(
                     launcher.toggle();
                     IpcResponse::Ok("launcher toggled".into())
                 }
-                "glitch" => {
-                    // Trigger random glitch manually.
-                    animations.maybe_random_glitch(&cfg.animations, 1.0, canvas.width, canvas.height);
-                    IpcResponse::Ok("glitch triggered".into())
-                }
                 _ => IpcResponse::Error(format!("unknown command: {}", name)),
             }
         }
@@ -2258,7 +2186,8 @@ fn handle_ipc_request(
         }
         GetVersion => {
             IpcResponse::Ok(format!(
-                "{{\"name\":\"superhot-tty\",\"version\":\"0.5.0\",\"libvterm\":{}}}",
+                "{{\"name\":\"{}\",\"version\":\"{}\",\"libvterm\":{}}}",
+                env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),
                 crate::term::libvterm::available()
             ))
         }

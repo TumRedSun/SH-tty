@@ -1,13 +1,13 @@
 [package]
-name = "superhot-tty"
-version = "0.5.0"
+name = "shtty"
+version = "0.6.0"
 edition = "2021"
-description = "SuperHot MCD-styled TTY window manager with DRI3, hardware cursor, overlay planes, login screen, multi-monitor, live-reload config, glitch animations, IPC socket, libvterm xterm compatibility"
-authors = ["superhot-tty contributors"]
+description = "Tile-based TTY window manager with DRI3, hardware cursor, overlay planes, PAM login screen, multi-monitor, live-reload config, IPC socket, and X11 window embedding"
+authors = ["shtty contributors"]
 license = "MIT"
 
 [[bin]]
-name = "superhot-tty"
+name = "shtty"
 path = "src/main.rs"
 
 [[bin]]
@@ -89,7 +89,7 @@ memmap2 = "0.9"
 # box-drawing, math symbols, etc.). Falls back to PSF bitmap fonts if freetype
 # is unavailable or no TTF font is found.
 # Optional — disabled via `--no-default-features` if libfreetype2 is missing.
-freetype-rs = { version = "0.38", optional = true }
+freetype-rs = { version = "0.35", optional = true }
 
 [profile.release]
 opt-level = 3

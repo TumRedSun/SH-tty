@@ -32,7 +32,7 @@ impl Backend {
             let fb = FbdevBackend::new("/dev/fb0")?;
             return Ok(Backend::Fbdev(fb));
         }
-        anyhow::bail!("no DRM device nor fbdev available — superhot-tty requires a graphical console")
+        anyhow::bail!("no DRM device nor fbdev available — shtty requires a graphical console")
     }
 
     pub fn dimensions(&self) -> (u32, u32) {

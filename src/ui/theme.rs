@@ -1,7 +1,7 @@
-//! MCD (Mind Control Delete) neon palette.
+//! Неоновая палитра темы по умолчанию.
 //!
 //! Базовый фон — глубокий фиолетовый, акценты — неоновый циан и магента.
-//! Глитч-эффекты достигаются смещением слоёв с разной альфой.
+//! Все цвета переопределяются секцией [theme] в config.toml.
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8);
@@ -36,7 +36,7 @@ impl PixelFmt {
     }
 }
 
-/// Палитра MCD.
+/// Палитра по умолчанию.
 pub struct Theme {
     // Базовый фон экрана — глубокий ночной фиолет.
     pub bg: Color,
@@ -54,9 +54,9 @@ pub struct Theme {
     pub fg_default: Color,
     // Текст тусклый — для non-focused.
     pub fg_dim: Color,
-    // Цвет акцента — неоновая магента (как «CORE» в MCD).
+    // Цвет акцента — неоновая магента.
     pub accent_magenta: Color,
-    // Цвет акцента — неоновый циан (как «HACK» в MCD).
+    // Цвет акцента — неоновый циан.
     pub accent_cyan: Color,
     // Цвет popup фона.
     pub popup_bg: Color,
@@ -86,7 +86,7 @@ impl Default for Theme {
     }
 }
 
-/// ANSI 16-color palette, mapped to MCD-coherent hues.
+/// ANSI 16-color palette.
 pub const ANSI_PALETTE: [Color; 16] = [
     Color(0x12, 0x0E, 0x24), // black
     Color(0xFF, 0x2E, 0x97), // red — magenta

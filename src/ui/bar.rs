@@ -49,6 +49,8 @@ struct ModuleCache {
     /// Cached output (for dynamic modules).
     cached_output: Option<String>,
     /// Per-module internal state (e.g. previous CPU jiffies for delta calc).
+    /// CPU-джифики хранятся в Bar напрямую, поле пока не задействовано.
+    #[allow(dead_code)]
     state: HashMap<String, String>,
 }
 
@@ -103,6 +105,7 @@ impl Bar {
     }
 
     /// Replace config (used for live reload).
+    #[allow(dead_code)] // зарезервировано для live-reload bar-конфига без пересоздания
     pub fn update_cfg(&mut self, cfg: BarCfg, theme: &Theme) {
         let bg = cfg.bg.as_ref()
             .map(|s| { let (r,g,b) = crate::config::parse_color(s); Color(r,g,b) })

@@ -1,12 +1,8 @@
-//! SuperHot MCD-styled popups.
+//! Popups — всплывающие уведомления поверх экрана.
 //!
-//! В MCD всплывающие окна появляются с глитч-эффектом: сначала «призрак» рамки
-//! со смещением по RGB-каналам, потом раскрытие. Мы эмулируем это через
-//! многослойный рендер: 3 рамки со смещением (-2,0,2)x с цветами R/G/B.
-//!
-//! В v0.3 popup может показывать:
+//! Виды popup:
 //!   - Простой текст (Info/Alert)
-//!   - Вывод скрипта (PopupScript) — multiline ASCII art
+//!   - Вывод скрипта (Script) — multiline текст
 //!   - Prompt (односторонний input)
 
 use crate::render::canvas::Canvas;
@@ -15,16 +11,14 @@ use crate::render::font::Font;
 use crate::ui::theme::{Color, Theme};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Alert/Prompt/KillCam variants reserved for future popup types
+#[allow(dead_code)] // Alert/Prompt variants reserved for future popup types
 pub enum PopupKind {
-    /// «SYSTEM ALERT» в стиле MCD — крупный текст по центру.
+    /// Крупный текст по центру.
     Alert,
     /// Текстовый диалог (командная строка, имя файла).
     Prompt(String),
     /// Системное сообщение (лог, ошибка).
     Info(String),
-    /// Kill cam (когда закрывается окно).
-    KillCam,
     /// Вывод скрипта — multiline ASCII текст.
     Script(String),
 }
@@ -35,14 +29,14 @@ pub struct Popup {
     pub y: i32,
     pub w: u32,
     pub h: u32,
-    /// Ticks since appeared — для анимации.
+    /// Ticks since appeared — для мигания курсора/таймингов.
     pub age: u32,
     /// Visibility.
     pub visible: bool,
 }
 
 impl Popup {
-    #[allow(dead_code)] // reserved for future MCD-style alerts
+    #[allow(dead_code)] // reserved for future alerts
     pub fn alert(_text: &str, screen_w: u32, screen_h: u32) -> Self {
         let w = screen_w.min(800);
         let h = 120;
@@ -83,16 +77,6 @@ impl Popup {
         }
     }
 
-    #[allow(dead_code)] // reserved for future window-close animation
-    pub fn killcam(screen_w: u32, screen_h: u32) -> Self {
-        Popup {
-            kind: PopupKind::KillCam,
-            x: 0, y: 0, w: screen_w, h: screen_h,
-            age: 0,
-            visible: true,
-        }
-    }
-
     /// Создаёт popup с multiline контентом (например из скрипта).
     ///
     /// Размер popup рассчитывается по количеству Unicode-символов (chars),
@@ -123,39 +107,24 @@ impl Popup {
         self.age = self.age.saturating_add(1);
     }
 
-    /// Рендерит popup на canvas. font передаётся для multiline/script popups.
+    /// Рендерит popup на canvas.
     pub fn render(&self, canvas: &Canvas, theme: &Theme) {
         if !self.visible { return; }
-        // Глитч-анимация: первые 10 тиков — расширяющиеся RGB-рамки.
-        let glitch_phase = self.age.min(10);
 
         // BG.
         canvas.fill_rect(self.x, self.y, self.w, self.h, theme.popup_bg);
 
-        // Triple-rendered glitch border.
         let main_color = match self.kind {
             PopupKind::Alert    => theme.accent_magenta,
             PopupKind::Prompt(_) => theme.accent_cyan,
             PopupKind::Info(_)   => theme.accent_cyan,
-            PopupKind::KillCam  => theme.error,
             PopupKind::Script(_) => theme.accent_magenta,
         };
 
-        for (offset, color) in [
-            (-2i32, Color(0xFF, 0x00, 0x00)), // R
-            ( 0,    Color(0x00, 0xFF, 0x00)), // G
-            ( 2,    Color(0x00, 0xC0, 0xFF)), // B
-        ] {
-            let alpha = if glitch_phase < 8 { 200 } else { 120 };
-            let _ = alpha;
-            let dx = self.x + offset;
-            let dy = self.y + (offset / 2);
-            canvas.rect_outline(dx, dy, self.w, self.h, 1, color);
-        }
-        // Main bright border.
+        // Main border.
         canvas.rect_outline(self.x, self.y, self.w, self.h, 2, main_color);
 
-        // Угловые акценты (как MCD corner brackets).
+        // Угловые акценты.
         let cs = 12; // corner size
         canvas.fill_rect(self.x, self.y, cs, 2, main_color);
         canvas.fill_rect(self.x, self.y, 2, cs, main_color);
@@ -165,7 +134,6 @@ impl Popup {
         canvas.fill_rect(self.x, self.y + self.h as i32 - cs as i32, 2, cs, main_color);
         canvas.fill_rect(self.x + self.w as i32 - cs as i32, self.y + self.h as i32 - 2, cs, 2, main_color);
         canvas.fill_rect(self.x + self.w as i32 - 2, self.y + self.h as i32 - cs as i32, 2, cs, main_color);
-        let _ = glitch_phase;
     }
 
     /// Рендерит текст popup с использованием шрифта.
@@ -194,7 +162,6 @@ impl Popup {
                     text.draw_text(self.x + 10, ly, line, theme.fg_default, None);
                 }
             }
-            PopupKind::KillCam => {}
         }
     }
 }

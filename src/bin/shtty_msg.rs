@@ -1,4 +1,4 @@
-//! `shtty-msg` — CLI утилита для отправки команд на IPC сокет superhot-tty.
+//! `shtty-msg` — CLI утилита для отправки команд на IPC сокет shtty.
 //!
 //! Протокол i3-msg-совместимый. Примеры:
 //!   shtty-msg "workspace 2"
@@ -14,7 +14,7 @@
 //!   shtty-msg --get-focused
 //!   shtty-msg --get-version
 //!
-//! Это standalone binary — не зависит от основного crate superhot-tty.
+//! Это standalone binary — не зависит от основного crate shtty.
 //! Запускается в user-space, подключается к UNIX-сокету и отправляет JSON.
 
 use std::env;
@@ -24,16 +24,16 @@ use std::path::PathBuf;
 
 fn resolve_socket_path() -> PathBuf {
     // Порядок:
-    //   1. $XDG_RUNTIME_DIR/superhot-tty.sock
-    //   2. /tmp/superhot-tty-$UID.sock
-    //   3. /tmp/superhot-tty.sock (fallback)
+    //   1. $XDG_RUNTIME_DIR/shtty.sock
+    //   2. /tmp/shtty-$UID.sock
+    //   3. /tmp/shtty.sock (fallback)
     if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
         if !xdg.is_empty() {
-            return PathBuf::from(format!("{}/superhot-tty.sock", xdg));
+            return PathBuf::from(format!("{}/shtty.sock", xdg));
         }
     }
     let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/superhot-tty-{}.sock", uid))
+    PathBuf::from(format!("/tmp/shtty-{}.sock", uid))
 }
 
 fn json_escape(s: &str) -> String {
@@ -76,7 +76,6 @@ fn main() {
         eprintln!("  shtty-msg \"fullscreen toggle\"");
         eprintln!("  shtty-msg \"layout toggle\"");
         eprintln!("  shtty-msg \"launcher\"            — toggle launcher");
-        eprintln!("  shtty-msg \"glitch\"              — trigger random glitch");
         eprintln!();
         eprintln!("Queries:");
         eprintln!("  shtty-msg --get-workspaces");
@@ -92,7 +91,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("shtty-msg: cannot connect to {}: {}", socket_path.display(), e);
-            eprintln!("  Is superhot-tty running? Is IPC enabled in config?");
+            eprintln!("  Is shtty running? Is IPC enabled in config?");
             std::process::exit(2);
         }
     };

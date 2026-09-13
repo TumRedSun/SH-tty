@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# install.sh — установка superhot-tty v0.2 на Arch Linux.
+# install.sh — установка shtty (тайловый TTY window manager) на Arch Linux.
 # Запускать от root: sudo ./install.sh
 #
-# Что нового в v0.2:
-#   - TOML конфиг /etc/SH-tty/config.toml
-#   - Workspaces 1-9 + перемещение окон между ними
-#   - Launcher Super+D (rofi-подобный, читает .desktop файлы)
-#   - Mouse + софтверный курсор MCD-стиля
-#   - Gamepad (evdev passthrough для Steam + опционально SDL2 для маппинга)
-#   - PipeWire audio stack
-#   - xdg-desktop-portal backend для screen share в OBS/Discord
-#   - DRI3/DMA-BUF GPU-ускорение X11 (infrastructure)
-#   - zsh по умолчанию, TERM=xterm-256color
+# Что делает:
+#   - Создаёт системного пользователя 'shtty' для privilege separation
+#   - Собирает и ставит бинарник + systemd unit
+#   - TOML конфиг /etc/shtty/config.toml
+#   - Каталог /etc/shtty/font-fallbacks/ для символ-шрифтов (иконки)
+#   - Отключает getty@tty1 и включает shtty@tty1
 
 set -euo pipefail
 
@@ -27,26 +23,26 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-echo_blue "==> Creating 'superhot-tty' system user for privilege separation..."
+echo_blue "==> Creating 'shtty' system user for privilege separation..."
 # The login screen runs as this unprivileged user. PAM auth happens in the
 # root parent process via fork+socketpair. The user needs:
 #   - video, render, input groups: to access DRM/input devices inherited from root
 #   - tty group: to use the controlling terminal
 #   - NOT shadow group: prevents direct /etc/shadow reads (auth goes via parent)
-if ! id "superhot-tty" &>/dev/null; then
+if ! id "shtty" &>/dev/null; then
     useradd --system \
         --no-create-home \
         --home-dir / \
         --shell /usr/sbin/nologin \
         --groups video,input,render,tty \
-        --comment "superhot-tty login screen user" \
-        superhot-tty
-    echo_green "Created system user 'superhot-tty'"
+        --comment "shtty login screen user" \
+        shtty
+    echo_green "Created system user 'shtty'"
 else
-    echo_yellow "User 'superhot-tty' already exists — ensuring group membership"
+    echo_yellow "User 'shtty' already exists — ensuring group membership"
     for grp in video input render tty; do
-        if ! id -nG superhot-tty | grep -qw "$grp"; then
-            usermod -aG "$grp" superhot-tty
+        if ! id -nG shtty | grep -qw "$grp"; then
+            usermod -aG "$grp" shtty
         fi
     done
 fi
@@ -74,6 +70,11 @@ DEPS=(
     freetype2
     fontconfig
     kbd
+    # Символ-шрифты: Nerd Font иконки (терминалы, prompt) + базовое покрытие
+    # символов. Без них Nerd Font-иконки рендерятся как '?'.
+    ttf-dejavu
+    ttf-nerd-fonts-symbols
+    noto-fonts
     # zsh по умолчанию:
     zsh
 )
@@ -139,22 +140,26 @@ fi
 
 ALL_FEATURES="$SDL2_FEATURE $PAM_FEATURE"
 
-echo_blue "==> Building superhot-tty v0.2 (release)..."
+echo_blue "==> Building shtty (release)..."
 cd "$SCRIPT_DIR"
 cargo build --release $ALL_FEATURES
 
-echo_blue "==> Installing binary to /usr/local/bin/superhot-tty..."
-install -Dm755 target/release/superhot-tty /usr/local/bin/superhot-tty
+echo_blue "==> Installing binaries to /usr/local/bin..."
+install -Dm755 target/release/shtty /usr/local/bin/shtty
+install -Dm755 target/release/shtty-msg /usr/local/bin/shtty-msg
 
 echo_blue "==> Installing systemd unit..."
-install -Dm644 systemd/superhot-tty@.service /etc/systemd/system/superhot-tty@.service
+install -Dm644 systemd/shtty@.service /etc/systemd/system/shtty@.service
 
 echo_blue "==> Installing default config..."
-install -d -m755 /etc/SH-tty
+install -d -m755 /etc/shtty
+# Каталог для пользовательских fallback-шрифтов: любые .ttf/.otf отсюда
+# подключаются как источник недостающих символов (иконки и т.п.).
+install -d -m755 /etc/shtty/font-fallbacks
 # Всегда перезаписываем config.toml последней версией.
-# Пользовательские настройки могут быть в ~/.config/SH-tty/config.toml
-install -Dm644 config/default.toml /etc/SH-tty/config.toml
-echo_green "Installed /etc/SH-tty/config.toml (updated)"
+# Пользовательские настройки могут быть в ~/.config/shtty/config.toml
+install -Dm644 config/default.toml /etc/shtty/config.toml
+echo_green "Installed /etc/shtty/config.toml (updated)"
 
 # Дизейблим стандартный getty на tty1.
 echo_blue "==> Disabling default getty on tty1..."
@@ -173,18 +178,18 @@ ExecStart=-/bin/false
 EOF
 
 # Включаем наш unit (force — снимает previous disabled state).
-echo_blue "==> Enabling superhot-tty@tty1..."
+echo_blue "==> Enabling shtty@tty1..."
 # Очищаем crash state file — если были предыдущие падения, не хотим
 # сразу попасть в crash loop detection при первом запуске после install.
-rm -f /run/superhot-tty-crashes
+rm -f /run/shtty-crashes
 systemctl daemon-reload
 # systemctl enable может вернуть ошибку если unit уже enabled — это ОК.
 # Используем --force чтобы переустановить symlink'и (полезно если что-то
 # было в неconsistente состоянии после crash-loop).
-systemctl enable superhot-tty@tty1.service 2>&1 || true
+systemctl enable shtty@tty1.service 2>&1 || true
 # Reset failure state — иначе systemd может отказаться стартовать из-за
 # старых failed попыток (StartLimitHit).
-systemctl reset-failed superhot-tty@tty1.service 2>/dev/null || true
+systemctl reset-failed shtty@tty1.service 2>/dev/null || true
 
 # Kernel cmdline для DRM modeset.
 echo_blue "==> Checking kernel cmdline for DRM modeset..."
@@ -218,7 +223,7 @@ echo_green "==> Installation complete!"
 echo ""
 echo_blue "Next steps:"
 echo "  1. Перезагрузитесь: sudo reboot"
-echo "  2. На tty1 автоматически запустится superhot-tty v0.2"
+echo "  2. На tty1 автоматически запустится shtty: логин → пароль → Enter"
 echo "  3. Для переключения на обычный TTY: Ctrl+Alt+F2"
 echo "  4. Mod4+D — launcher (читает .desktop файлы)"
 echo "  5. Mod4+1..9 — workspaces"
@@ -228,15 +233,16 @@ echo "  8. Mod4+Shift+1..9 — переместить окно на другой
 echo "  9. Mod4+R — resize mode (HJKL)"
 echo ""
 echo_blue "Configuration:"
-echo "  /etc/SH-tty/config.toml  — основной конфиг"
-echo "  /etc/SH-tty/font.psfu    — кастомный шрифт (опционально)"
+echo "  /etc/shtty/config.toml  — основной конфиг"
+echo "  /etc/shtty/font.ttf     — кастомный шрифт (опционально)"
+echo "  /etc/shtty/font-fallbacks/ — .ttf/.otf файлы с недостающими символами (иконки)"
 echo ""
 echo_blue "Audio (PipeWire):"
 echo "  pactl set-sink-volume @DEFAULT_SINK@ 80%   — громкость"
 echo "  pactl set-sink-mute @DEFAULT_SINK@ toggle — mute"
 echo ""
 echo_blue "Screen share:"
-echo "  Discord/Slack: выберите 'SuperHot' в источниках экрана"
+echo "  Discord/Slack: выберите 'shtty' в источниках экрана"
 echo "  OBS: добавьте ScreenCast source (через xdg-desktop-portal)"
 echo ""
 echo_blue "Gamepad:"
@@ -244,7 +250,7 @@ echo "  Steam Input работает нативно (evdev passthrough)"
 echo "  Для маппинга кнопок вне Steam: cargo build --features gamepad-sdl2"
 echo ""
 echo_yellow "Если что-то сломалось — Ctrl+Alt+F2 для обычного getty, и:"
-echo_yellow "  sudo systemctl disable superhot-tty@tty1"
+echo_yellow "  sudo systemctl disable shtty@tty1"
 echo_yellow "  sudo systemctl enable getty@tty1"
 echo_yellow "  sudo rm /etc/systemd/system/getty@tty1.service.d/override.conf"
 echo_yellow "  sudo systemctl daemon-reload && sudo reboot"

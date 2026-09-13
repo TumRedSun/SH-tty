@@ -75,6 +75,7 @@ impl Default for VTermScreenCell {
 }
 
 /// Глобальный singleton: загруженная libvterm и указатели на функции.
+#[allow(dead_code)]
 struct LibVTerm {
     _lib: Library,
     vterm_new: unsafe extern "C" fn(rows: c_int, cols: c_int) -> *mut c_void,
@@ -145,6 +146,7 @@ unsafe impl Send for LibVTermHandle {}
 
 impl LibVTermHandle {
     /// Создаёт новый libvterm instance. Возвращает None если libvterm недоступна.
+    #[allow(dead_code)]
     pub fn new(cols: u16, rows: u16) -> Option<Self> {
         let lib = load_libvterm()?;
         unsafe {

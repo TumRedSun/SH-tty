@@ -66,6 +66,7 @@ struct Atoms {
     wm_protocols: u32,
     wm_delete_window: u32,
     wm_name: u32,
+    #[allow(dead_code)] // WM_CLASS интернится для будущего использования
     wm_class: u32,
     net_wm_name: u32,
     wm_transient_for: u32,
@@ -191,7 +192,7 @@ impl X11Compositor {
 
         log::info!("X11 compositor started on {} (root=0x{:x})", display, root);
 
-        let mut compositor = X11Compositor {
+        let compositor = X11Compositor {
             conn,
             root,
             windows: Vec::new(),
@@ -519,6 +520,7 @@ impl X11Compositor {
     }
 
     /// Возвращает XID окна, на которое сейчас установлен input focus.
+    #[allow(dead_code)]
     pub fn focused_window(&self) -> Option<u32> {
         self.focused_xid
     }
@@ -691,7 +693,7 @@ impl X11Compositor {
     /// Проверяет, существует ли ещё X-окно на сервере.
     /// Используется в close_window для fallback destroy.
     fn window_exists(&self, xid: u32) -> bool {
-        use x11rb::protocol::xproto::{get_window_attributes, ConnectionExt};
+        use x11rb::protocol::xproto::get_window_attributes;
         match get_window_attributes(&self.conn, xid) {
             Ok(c) => c.reply().is_ok(),
             Err(_) => false,
@@ -702,7 +704,7 @@ impl X11Compositor {
     /// Приложения, которые этого не делают, при попытке закрытия через
     /// ClientMessage просто его игнорируют — приходится destroy_window().
     fn window_supports_wm_delete(&self, xid: u32) -> bool {
-        use x11rb::protocol::xproto::{get_property, ConnectionExt};
+        use x11rb::protocol::xproto::get_property;
         let atoms = self.atoms();
         let conn = &self.conn;
 
@@ -733,7 +735,7 @@ impl X11Compositor {
     /// предпочтительнее — это UTF-8, в то время как WM_NAME может быть
     /// в COMPOUND_TEXT (устаревший). Возвращаем String (UTF-8).
     fn get_window_name(&self, xid: u32) -> Option<String> {
-        use x11rb::protocol::xproto::{get_property, ConnectionExt};
+        use x11rb::protocol::xproto::get_property;
         let atoms = self.atoms();
         let conn = &self.conn;
 
@@ -772,7 +774,7 @@ impl X11Compositor {
     /// Получает geometry окна (width, height) через get_geometry request.
     /// Возвращает None если запрос не удался (например, окно уже уничтожено).
     fn get_window_geometry(&self, xid: u32) -> Option<(u16, u16)> {
-        use x11rb::protocol::xproto::{get_geometry, ConnectionExt};
+        use x11rb::protocol::xproto::get_geometry;
         let conn = &self.conn;
         match get_geometry(conn, xid) {
             Ok(c) => match c.reply() {
@@ -793,7 +795,7 @@ impl X11Compositor {
     /// отслеживаемого окна. Возвращает true если WM_TRANSIENT_FOR указывает
     /// на одно из наших tracked windows.
     fn is_transient_of_tracked(&self, xid: u32) -> bool {
-        use x11rb::protocol::xproto::{get_property, ConnectionExt};
+        use x11rb::protocol::xproto::get_property;
         let atoms = self.atoms();
         let conn = &self.conn;
 

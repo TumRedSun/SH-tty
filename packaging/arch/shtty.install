@@ -1,20 +1,20 @@
-# SuperHot TTY install hook.
+# SHTTY install hook.
 # Выполняется при установке/обновлении пакета.
 
 post_install() {
     echo ""
-    echo "==> SuperHot TTY installed!"
+    echo "==> SHTTY installed!"
     echo ""
     echo "To enable:"
     echo "  sudo systemctl disable getty@tty1"
-    echo "  sudo systemctl enable superhot-tty@tty1"
+    echo "  sudo systemctl enable shtty@tty1"
     echo "  sudo reboot"
     echo ""
-    echo "Config: /etc/SH-tty/config.toml"
-    echo "User config: ~/.config/SH-tty/config.toml"
+    echo "Config: /etc/shtty/config.toml"
+    echo "User config: ~/.config/shtty/config.toml"
     echo ""
     echo "Rollback to agetty:"
-    echo "  sudo systemctl disable superhot-tty@tty1"
+    echo "  sudo systemctl disable shtty@tty1"
     echo "  sudo systemctl enable getty@tty1"
     echo ""
 }
@@ -25,13 +25,13 @@ post_upgrade() {
 
 pre_remove() {
     # Откатываем к стандартному getty.
-    if systemctl is-enabled superhot-tty@tty1 >/dev/null 2>&1; then
-        systemctl disable superhot-tty@tty1
+    if systemctl is-enabled shtty@tty1 >/dev/null 2>&1; then
+        systemctl disable shtty@tty1
     fi
     if [ -f /etc/systemd/system/getty@tty1.service.d/override.conf ]; then
         rm -f /etc/systemd/system/getty@tty1.service.d/override.conf
         systemctl enable getty@tty1 2>/dev/null || true
     fi
     systemctl daemon-reload
-    echo "==> SuperHot TTY disabled, getty@tty1 restored"
+    echo "==> SHTTY disabled, getty@tty1 restored"
 }

@@ -1,12 +1,12 @@
 [Unit]
-Description=SuperHot TTY window manager v0.5 on %I (privilege separation)
+Description=SHTTY window manager v0.5 on %I (privilege separation)
 Conflicts=rescue.service
 After=systemd-logind.service systemd-vconsole-setup.service
 Before=getty.target
 Wants=systemd-logind.service
 After=systemd-user-sessions.service plymouth-quit.service
 
-# Disable default agetty — superhot-tty имеет собственный login screen.
+# Disable default agetty — shtty имеет собственный login screen.
 Conflicts=getty@%i.service
 
 # Crash loop protection: если сервис упал 5 раз за 60 секунд,
@@ -17,7 +17,7 @@ StartLimitBurst=5
 
 [Service]
 Type=idle
-ExecStart=/usr/local/bin/superhot-tty
+ExecStart=/usr/local/bin/shtty
 Restart=always
 RestartSec=2
 
@@ -32,7 +32,7 @@ TTYVTDisallocate=yes
 # Запуск от root — нужен только на старте:
 #   1. Открыть DRM master fd
 #   2. Открыть /dev/input/event*
-#   3. fork() — ребёнок drop к "superhot-tty" (login screen)
+#   3. fork() — ребёнок drop к "shtty" (login screen)
 #      родитель остаётся root для PAM auth, затем drop к вошедшему пользователю
 # После успешного входа процесс работает от имени пользователя.
 #
@@ -56,10 +56,10 @@ LockPersonality=true
 
 Environment=DISPLAY=:1
 Environment=XDG_SESSION_TYPE=desktop
-Environment=XDG_CURRENT_DESKTOP=superhot
+Environment=XDG_CURRENT_DESKTOP=shtty
 Environment=LANG=en_US.UTF-8
 Environment=RUST_LOG=info
-Environment=SUPERHOT_TTY=1
+Environment=SHTTY=1
 
 KillMode=process
 KillSignal=SIGTERM

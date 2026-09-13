@@ -1,9 +1,9 @@
 //! Полноценный конфиг тайлового WM в TOML формате (v0.3).
 //!
 //! Пути поиска конфига (в порядке приоритета):
-//!   1. $XDG_CONFIG_HOME/SH-tty/config.toml  (обычно ~/.config/SH-tty/config.toml)
-//!   2. ~/.config/SH-tty/config.toml
-//!   3. /etc/SH-tty/config.toml              (system-wide default)
+//!   1. $XDG_CONFIG_HOME/shtty/config.toml  (обычно ~/.config/shtty/config.toml)
+//!   2. ~/.config/shtty/config.toml
+//!   3. /etc/shtty/config.toml              (system-wide default)
 //!
 //! Никаких захардкоженных биндингов — все в `[[keybindings]]`.
 //! Никаких захардкоженных настроек — все имеют defaults.
@@ -48,10 +48,6 @@ pub struct Config {
     /// Live-reload конфигурации (inotify watcher на config.toml).
     #[serde(default)]
     pub live_reload: LiveReloadCfg,
-    /// Анимации перехода между workspaces и появления новых окон.
-    #[serde(default)]
-    pub animations: AnimationsCfg,
-    /// IPC сокет (как i3-msg).
     #[serde(default)]
     pub ipc: IpcCfg,
     /// Status bar — полность настраиваемая, как polybar/waybar.
@@ -74,8 +70,6 @@ pub struct General {
     pub outer_padding: i32,
     pub status_bar_height: u32,
     pub framerate: u32,
-    /// Случайные глитч-эффекты для MCD-стиля (0.0..1.0).
-    pub glitch_intensity: f32,
     /// Количество workspaces (по умолчанию 10 — 1..9 + 0=10).
     pub workspace_count: u8,
 }
@@ -91,7 +85,6 @@ impl Default for General {
             outer_padding: 4,
             status_bar_height: 24,
             framerate: 60,
-            glitch_intensity: 0.15,
             workspace_count: 10,
         }
     }
@@ -142,12 +135,12 @@ impl Default for ThemeCfg {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct LoginCfg {
-    /// Текст по центру экрана (как в SHMCD). Например "MORE", "БОЛЬШЕ" или свой текст.
+    /// Текст по центру экрана. Например "SHTTY" или свой текст.
     pub title: String,
     /// Подзаголовок под главным текстом.
     pub subtitle: String,
     /// Язык — определяет дефолтные строки если title/subtitle не заданы.
-    /// "ru" → "БОЛЬШЕ" / "СУПЕРХОТ", "en" → "MORE" / "SUPERHOT".
+    /// "ru" → русские подписи полей/подсказок, "en" → английские.
     pub language: String,
     /// Шрифт для большого заголовка (если отличается от general.font).
     pub title_font: Option<String>,
@@ -155,7 +148,7 @@ pub struct LoginCfg {
     pub show_clock: bool,
     /// Цвет текста login (по умолчанию = theme.accent_magenta).
     pub title_color: Option<String>,
-    /// Показывать ли подсказку "Press Enter to login".
+    /// Показывать ли подсказки под полями ввода.
     pub show_hint: bool,
     /// PAM service (обычно "login").
     pub pam_service: String,
@@ -184,19 +177,17 @@ impl LoginCfg {
     pub fn effective_title(&self) -> String {
         if !self.title.is_empty() {
             self.title.clone()
-        } else if self.language == "ru" {
-            "БОЛЬШЕ".into()
         } else {
-            "MORE".into()
+            "SHTTY".into()
         }
     }
     pub fn effective_subtitle(&self) -> String {
         if !self.subtitle.is_empty() {
             self.subtitle.clone()
         } else if self.language == "ru" {
-            "СУПЕРХОТ TTY".into()
+            "Тайловый менеджер".into()
         } else {
-            "SUPERHOT TTY".into()
+            "Tiling Window Manager".into()
         }
     }
 }
@@ -379,9 +370,9 @@ impl Default for LauncherCfg {
     }
 }
 
-/// Конфигурация popups (центральный MCD-styled popup).
+/// Конфигурация popups.
 ///
-/// Поля `max_width_pct`, `glitch_border`, `font` парсятся но не применяются —
+/// Поля `max_width_pct`, `font` парсятся но не применяются —
 /// помечены allow(dead_code) для future use.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -392,9 +383,6 @@ pub struct PopupsCfg {
     /// Максимальная ширина popup в процентах от экрана.
     #[serde(default = "default_popup_max_w")]
     pub max_width_pct: u32,
-    /// Показывать glitch border (RGB-сдвиг).
-    #[serde(default = "default_true")]
-    pub glitch_border: bool,
     /// Шрифт для popup (если отличается).
     #[serde(default)]
     pub font: Option<String>,
@@ -408,7 +396,6 @@ impl Default for PopupsCfg {
         PopupsCfg {
             duration_frames: 240,
             max_width_pct: 67,
-            glitch_border: true,
             font: None,
         }
     }
@@ -447,14 +434,14 @@ pub struct PortalCfg {
     pub object_path: String,
 }
 
-fn default_portal_name() -> String { "org.freedesktop.impl.portal.desktop.SuperHot".into() }
+fn default_portal_name() -> String { "org.freedesktop.impl.portal.desktop.SHTTY".into() }
 fn default_portal_path() -> String { "/org/freedesktop/portal/desktop".into() }
 
 impl Default for PortalCfg {
     fn default() -> Self {
         PortalCfg {
             start_portal: true,
-            service_name: "org.freedesktop.impl.portal.desktop.SuperHot".into(),
+            service_name: "org.freedesktop.impl.portal.desktop.SHTTY".into(),
             object_path: "/org/freedesktop/portal/desktop".into(),
         }
     }
@@ -562,115 +549,6 @@ impl Default for LiveReloadCfg {
     }
 }
 
-// ===== Animations =====
-
-/// Конфигурация glitch-анимаций MCD-стиля.
-///
-/// Анимации трёх типов:
-///   1. Workspace transition — при переключении ws все символы экрана (терминалы,
-///      разделители, X11-окна как квадраты) перебираются случайными символами
-///      английского алфавита (заглавными) и квадратами с разной заливкой.
-///      Параллельно новый ws "проявляется" — добавляются недостающие символы и
-///      убираются лишние. Затем с левого верхнего угла в правый нижний символы
-///      фиксируются в финальном состоянии.
-///   2. New window — квадрат нового окна заливается перебором, через несколько
-///      секунд с левого верхнего угла в правый нижний перебор снимается.
-///   3. Random glitch — спонтанный глитч-эффект по тому же принципу (угол → угол),
-///      но более быстрый. Срабатывает с вероятностью glitch_intensity на кадр.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AnimationsCfg {
-    /// Включить анимации перехода между workspaces.
-    #[serde(default = "default_true")]
-    pub workspace_transition: bool,
-    /// Включить анимацию появления нового окна.
-    #[serde(default = "default_true")]
-    pub new_window: bool,
-    /// Включить случайные глитч-эффекты (MCD-style).
-    #[serde(default = "default_true")]
-    pub random_glitch: bool,
-
-    /// Длительность перехода между ws в мс (фаза перебора).
-    #[serde(default = "default_ws_transition_ms")]
-    pub ws_transition_ms: u32,
-    /// Длительность фазы "manifest" нового ws в мс (проявление целевого ws поверх
-    /// перебора — добавление недостающих и удаление лишних символов).
-    #[serde(default = "default_ws_manifest_ms")]
-    pub ws_manifest_ms: u32,
-    /// Длительность фазы "reveal" (corner-to-corner) в мс — от левого верхнего
-    /// до правого нижнего угла символы фиксируются.
-    #[serde(default = "default_ws_reveal_ms")]
-    pub ws_reveal_ms: u32,
-
-    /// Сколько мс окно "перебирается" перед началом reveal (для new window).
-    #[serde(default = "default_new_window_fill_ms")]
-    pub new_window_fill_ms: u32,
-    /// Длительность corner-to-corner reveal для нового окна в мс.
-    #[serde(default = "default_new_window_reveal_ms")]
-    pub new_window_reveal_ms: u32,
-
-    /// Длительность случайного глитча в мс (короче чем ws transition).
-    #[serde(default = "default_random_glitch_ms")]
-    pub random_glitch_ms: u32,
-    /// Частота случайного глитча — раз в N кадров в среднем. 0 = никогда.
-    /// Если glitch_intensity в [general] тоже учтится (произведение).
-    #[serde(default = "default_random_glitch_every_frames")]
-    pub random_glitch_every_frames: u32,
-
-    /// Скорость перебора символов: chars/sec для каждой анимации.
-    #[serde(default = "default_glitch_chars_per_sec")]
-    pub chars_per_sec: u32,
-    /// Скорость перебора для random glitch (обычно выше).
-    #[serde(default = "default_random_chars_per_sec")]
-    pub random_chars_per_sec: u32,
-
-    /// Использовать заглавные английские буквы (A-Z) в переборе.
-    #[serde(default = "default_true")]
-    pub glitch_use_alpha: bool,
-    /// Использовать квадраты с разной заливкой (FULL BLOCK, DARK SHADE, MEDIUM SHADE,
-    /// LIGHT SHADE, BLACK SQUARE, WHITE SQUARE, etc.) в переборе.
-    #[serde(default = "default_true")]
-    pub glitch_use_blocks: bool,
-    /// Использовать цифры в переборе (для большего MCD-стиля).
-    #[serde(default)]
-    pub glitch_use_digits: bool,
-    /// Цвет символов глитча (hex). По умолчанию = accent_cyan.
-    #[serde(default)]
-    pub glitch_color: Option<String>,
-}
-
-fn default_ws_transition_ms() -> u32 { 250 }
-fn default_ws_manifest_ms() -> u32 { 200 }
-fn default_ws_reveal_ms() -> u32 { 250 }
-fn default_new_window_fill_ms() -> u32 { 600 }
-fn default_new_window_reveal_ms() -> u32 { 250 }
-fn default_random_glitch_ms() -> u32 { 120 }
-fn default_random_glitch_every_frames() -> u32 { 360 }
-fn default_glitch_chars_per_sec() -> u32 { 60 }
-fn default_random_chars_per_sec() -> u32 { 220 }
-
-impl Default for AnimationsCfg {
-    fn default() -> Self {
-        AnimationsCfg {
-            workspace_transition: true,
-            new_window: true,
-            random_glitch: true,
-            ws_transition_ms: 250,
-            ws_manifest_ms: 200,
-            ws_reveal_ms: 250,
-            new_window_fill_ms: 600,
-            new_window_reveal_ms: 250,
-            random_glitch_ms: 120,
-            random_glitch_every_frames: 360,
-            chars_per_sec: 60,
-            random_chars_per_sec: 220,
-            glitch_use_alpha: true,
-            glitch_use_blocks: true,
-            glitch_use_digits: false,
-            glitch_color: None,
-        }
-    }
-}
-
 // ===== IPC =====
 
 /// Конфигурация IPC сокета (i3-msg совместимый протокол).
@@ -689,8 +567,8 @@ pub struct IpcCfg {
     /// Включить IPC сокет.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Путь к сокету. Если пусто — $XDG_RUNTIME_DIR/superhot-tty.sock или
-    /// /tmp/superhot-tty-$UID.sock.
+    /// Путь к сокету. Если пусто — $XDG_RUNTIME_DIR/shtty.sock или
+    /// /tmp/shtty-$UID.sock.
     #[serde(default)]
     pub socket_path: Option<String>,
     /// Права на файл сокета (octal). 0600 = только владелец.
@@ -765,14 +643,14 @@ pub fn config_paths() -> Vec<String> {
     let mut v = Vec::new();
     // XDG_CONFIG_HOME (обычно ~/.config).
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        v.push(format!("{}/SH-tty/config.toml", xdg));
+        v.push(format!("{}/shtty/config.toml", xdg));
     }
-    // ~/.config/SH-tty/config.toml
+    // ~/.config/shtty/config.toml
     if let Ok(home) = std::env::var("HOME") {
-        v.push(format!("{}/.config/SH-tty/config.toml", home));
+        v.push(format!("{}/.config/shtty/config.toml", home));
     }
-    // /etc/SH-tty/config.toml (system-wide).
-    v.push("/etc/SH-tty/config.toml".into());
+    // /etc/shtty/config.toml (system-wide).
+    v.push("/etc/shtty/config.toml".into());
     v
 }
 
@@ -935,7 +813,6 @@ impl Default for Config {
                     gamepad: GamepadCfg::default(),
                     x11: X11Cfg::default(),
                     live_reload: LiveReloadCfg::default(),
-                    animations: AnimationsCfg::default(),
                     ipc: IpcCfg::default(),
                     bar: BarCfg::default(),
                     _config_path: None,
@@ -986,3 +863,21 @@ pub fn expand_tilde(s: &str) -> String {
 
 #[allow(dead_code)]
 fn _unused(_p: PathBuf) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Регрессия: default.toml обязан парситься. Раньше после правок секций
+    /// в нём оказывались сироты-ключи, и WM молча стартовал с дефолтами.
+    #[test]
+    fn default_config_toml_parses() {
+        let parsed: Result<Config, _> = toml::from_str(Config::default_config_toml());
+        assert!(parsed.is_ok(), "config/default.toml не парсится: {:?}", parsed.err());
+        let cfg = parsed.unwrap();
+        // Ключевые секции, о которых знает WM.
+        assert!(cfg.general.workspace_count >= 1);
+        assert!(cfg.general.framerate >= 1);
+        assert!(!cfg.general.shell.is_empty());
+    }
+}
