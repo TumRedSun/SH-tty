@@ -23,6 +23,28 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# === Migration from v0.5 (superhot-tty) ===
+# Старые установки держали unit superhot-tty@.service и бинарник. Если их
+# не убрать, после обновления два WM будут претендовать на tty1 одновременно.
+LEGACY_UNIT="/etc/systemd/system/superhot-tty@.service"
+LEGACY_BIN="/usr/local/bin/superhot-tty"
+if [[ -f "$LEGACY_UNIT" || -f "$LEGACY_BIN" ]]; then
+    echo_blue "==> Removing legacy superhot-tty v0.5 artifacts..."
+    systemctl stop superhot-tty@tty1.service 2>/dev/null || true
+    systemctl disable superhot-tty@tty1.service 2>/dev/null || true
+    rm -f "$LEGACY_UNIT" "$LEGACY_BIN"
+    rm -f /run/superhot-tty-crashes
+    rm -rf /etc/systemd/system/getty@tty1.service.d
+    # Старый системный пользователь superhot-tty остаётся (не мешает);
+    # удалить вручную: userdel superhot-tty
+    echo_green "Legacy superhot-tty artifacts removed"
+fi
+# Старый системный конфиг-каталог — переносим в сторону (новый ставится ниже).
+if [[ -d /etc/SH-tty && ! -d /etc/shtty ]]; then
+    mv /etc/SH-tty /etc/SH-tty.old
+    echo_yellow "Old /etc/SH-tty moved to /etc/SH-tty.old (merge settings into ~/.config/shtty/config.toml if needed)"
+fi
+
 echo_blue "==> Creating 'shtty' system user for privilege separation..."
 # The login screen runs as this unprivileged user. PAM auth happens in the
 # root parent process via fork+socketpair. The user needs:
